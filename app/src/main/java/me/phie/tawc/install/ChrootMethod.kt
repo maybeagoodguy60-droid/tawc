@@ -79,18 +79,26 @@ class ChrootMethod(private val context: Context) : InstallationMethod {
                 appendLine(
                     """
                     # Attached rootfs has no in-tree libhybris (install
-                    # pipeline was skipped); supply it read-only from app
-                    # assets so guest GUI apps get hardware GL without
-                    # writing anything into the user-owned tree.
+                    # pipeline was skipped); supply it from app assets.
                     #
-                    # Single bind with ro in the same syscall — a separate
-                    # "remount,ro,bind" after the bind hits EBUSY because
-                    # /data (dm-*) is a shared superblock. Non-fatal: a
-                    # refused bind (busy, policy) must not kill the launch.
+                    # Try a single read-only bind first (any kernel where
+                    # /data isn't a shared/busy superblock takes it in one
+                    # syscall). Some devices refuse subdir binds out of
+                    # /data entirely with EBUSY; when that happens,
+                    # materialize the hybris tree into the rootfs instead
+                    # (one-time copy, same layout LibhybrisInstallProvider
+                    # uses for stock installs). The whole block is
+                    # non-fatal: a refused bind/missing copy warns but
+                    # never kills the launch.
                     mkdir -p $guestHybrisQ
                     if ! is_mounted $guestHybrisQ; then
-                        mount -o bind,rslave,ro $hybrisSrcQ $guestHybrisQ \
-                            || echo "[linuxx] libhybris bind refused; GUI may lack hardware GL"
+                        if ! mount -o bind,rslave,ro $hybrisSrcQ $guestHybrisQ 2>/dev/null; then
+                            echo "[linuxx] ro bind refused; materializing libhybris in-tree"
+                            if [ ! -f $guestHybrisQ/gl-shims/libEGL.so ]; then
+                                cp -a $hybrisSrcQ/. $guestHybrisQ/ || \
+                                    echo "[linuxx] libhybris copy failed; GUI may lack hardware GL"
+                            fi
+                        fi
                     fi
                     """.trimIndent()
                 )
