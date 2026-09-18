@@ -18,7 +18,7 @@ import java.io.File
  * pipeline method-agnostic (and in particular keeps [ProotMethod] from
  * accidentally inheriting root assumptions).
  */
-class ChrootMethod(context: Context) : InstallationMethod {
+class ChrootMethod(private val context: Context) : InstallationMethod {
     private val appPaths = AppPaths.from(context)
     private val store = InstallationStore(context)
 
