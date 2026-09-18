@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
+import java.io.IOException
 import me.phie.tawc.R
 import me.phie.tawc.AndoBrokers
 import me.phie.tawc.install.distro.BootstrapFlavor
@@ -516,7 +517,7 @@ class InstallationService : Service() {
             return
         }
         val abs = runCatching { java.io.File(path).canonicalPath }.getOrDefault(path)
-        if (store.list().any { it.externalRootfsPath?.let(::java.io.File)?.absolutePath == abs }) {
+        if (store.list().any { it.externalRootfsPath?.let { p -> java.io.File(p).absolutePath } == abs }) {
             rejectInstall(id, getString(R.string.install_reject_external_already_attached, abs))
             return
         }
