@@ -13,6 +13,12 @@ on:
 permissions:
   contents: read
 
+env:
+  # GitHub's ubuntu-24.04 image already ships the Android SDK here; we only
+  # add the pinned platform/build-tools/NDK on top.
+  ANDROID_HOME: /usr/local/lib/android/sdk
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -25,8 +31,8 @@ jobs:
 
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk \
-            /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo rm -rf /usr/share/dotnet /opt/ghc \
+            /usr/local/lib/android/sdk/ndk /usr/local/share/boost || true
           df -h /
 
       - name: Set up JDK 21
@@ -53,17 +59,16 @@ jobs:
             linux-libc-dev-arm64-cross \
             libclang-dev llvm zstd
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Install Android platform, build-tools and NDK
         run: |
-          sdkmanager --install \
+          SDKMGR="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)"
+          "$SDKMGR" --version
+          yes | "$SDKMGR" --licenses >/dev/null || true
+          "$SDKMGR" --install \
             "platform-tools" \
             "platforms;android-36" \
             "build-tools;36.0.0" \
             "ndk;27.2.12479018"
-          yes | sdkmanager --licenses >/dev/null || true
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
       - name: Install Rust (rustup)
