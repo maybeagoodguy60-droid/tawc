@@ -99,7 +99,11 @@ val xwaylandPackageAbis: List<String> =
 val xwaylandPackaged: Boolean = xwaylandPackageAbis.isNotEmpty()
 
 android {
-    namespace = "com.graydev.linuxx"
+    // namespace stays me.phie.tawc: AGP generates R/BuildConfig in the
+    // namespace package and every Kotlin source is package me.phie.tawc.
+    // The installed package identity comes from applicationId alone, so
+    // com.graydev.linuxx installs side-by-side with stock tawc.
+    namespace = "me.phie.tawc"
     compileSdk = 36
     ndkVersion = "27.2.12479018"
 
