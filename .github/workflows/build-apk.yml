@@ -7,8 +7,6 @@ name: Build tawc debug APK
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
 
 permissions:
   contents: read
