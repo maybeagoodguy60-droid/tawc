@@ -59,6 +59,12 @@ jobs:
             linux-libc-dev-arm64-cross \
             libclang-dev llvm zstd
 
+      - name: Upgrade meson (Ubuntu's is too old for pinned Mesa)
+        run: |
+          python3 -m pip install --user --break-system-packages "meson>=1.4"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/meson" --version
+
       - name: Install Android platform, build-tools and NDK
         run: |
           SDKMGR="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)"
