@@ -82,11 +82,16 @@ class ChrootMethod(private val context: Context) : InstallationMethod {
                     # pipeline was skipped); supply it read-only from app
                     # assets so guest GUI apps get hardware GL without
                     # writing anything into the user-owned tree.
+                    #
+                    # Single bind with ro in the same syscall — a separate
+                    # "remount,ro,bind" after the bind hits EBUSY because
+                    # /data (dm-*) is a shared superblock. Non-fatal: a
+                    # refused bind (busy, policy) must not kill the launch.
                     mkdir -p $guestHybrisQ
-                    is_mounted $guestHybrisQ || {
-                        mount -o bind,rslave $hybrisSrcQ $guestHybrisQ
-                        mount -o remount,ro,bind $guestHybrisQ
-                    }
+                    if ! is_mounted $guestHybrisQ; then
+                        mount -o bind,rslave,ro $hybrisSrcQ $guestHybrisQ \
+                            || echo "[linuxx] libhybris bind refused; GUI may lack hardware GL"
+                    fi
                     """.trimIndent()
                 )
             }
