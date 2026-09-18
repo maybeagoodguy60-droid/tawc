@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import java.io.IOException
+import java.io.File
 import me.phie.tawc.R
 import me.phie.tawc.AndoBrokers
 import me.phie.tawc.install.distro.BootstrapFlavor
@@ -208,6 +209,7 @@ class InstallationService : Service() {
                 intent.getBooleanExtra(EXTRA_ANDO, false),
                 intent.getStringExtra(EXTRA_BOOTSTRAP),
                 intent.getStringExtra(EXTRA_EXTERNAL_ROOTFS),
+                intent.getStringExtra(EXTRA_ARCHIVE),
             )
             ACTION_UNINSTALL -> startUninstall(rawId)
             else -> {
@@ -258,6 +260,7 @@ class InstallationService : Service() {
         andoEnabled: Boolean = false,
         bootstrapFlavorId: String? = null,
         externalRootfsPath: String? = null,
+        archivePath: String? = null,
     ) {
         if (!Installation.isValidId(id)) {
             rejectInstall(id, getString(R.string.install_reject_invalid_id))
@@ -274,15 +277,32 @@ class InstallationService : Service() {
         _log.resetReplayCache()
         lastLoggedStage = null
         val store = InstallationStore(applicationContext)
-        when (val s = store.load(id)?.state) {
-            null -> Unit  // (no dir) — proceed
-            Installation.State.READY,
-            Installation.State.INSTALLING,
-            Installation.State.UNINSTALLING,
-            Installation.State.FAILED,
-            Installation.State.CORRUPT -> {
-                rejectInstall(id, getString(R.string.install_reject_id_state, stateLabel(s)))
-                return
+        if (archivePath != null) {
+            // "Install from rootfs file" retries a failed/corrupt
+            // previous attempt for the same id from scratch: wipe the
+            // stale slot first, then proceed. Anything still READY (or
+            // mid-flight) at this slug is a real existing install and is
+            // refused rather than clobbered.
+            when (val s = store.load(id)?.state) {
+                null -> Unit  // (no dir) — proceed fresh
+                Installation.State.FAILED,
+                Installation.State.CORRUPT -> purgeInstallSlot(id)
+                else -> {
+                    rejectInstall(id, getString(R.string.install_reject_id_state, stateLabel(s)))
+                    return
+                }
+            }
+        } else {
+            when (val s = store.load(id)?.state) {
+                null -> Unit  // (no dir) — proceed
+                Installation.State.READY,
+                Installation.State.INSTALLING,
+                Installation.State.UNINSTALLING,
+                Installation.State.FAILED,
+                Installation.State.CORRUPT -> {
+                    rejectInstall(id, getString(R.string.install_reject_id_state, stateLabel(s)))
+                    return
+                }
             }
         }
         // Attach an existing rootfs? The whole download/configure
@@ -292,6 +312,13 @@ class InstallationService : Service() {
         // Entry is always the root chroot method; enabled in release.
         if (externalRootfsPath != null) {
             attachExternalRootfs(id, externalRootfsPath, label)
+            return
+        }
+        // Import from a rootfs archive? Same pipeline skip as attach,
+        // but the tree is produced here: stage the archive, extract it
+        // app-side, then move the result into /data/local/<id> as root.
+        if (archivePath != null) {
+            importRootfsArchive(id, archivePath, label)
             return
         }
         // Resolve the requested distro (or fall back to the host
@@ -587,6 +614,184 @@ class InstallationService : Service() {
             }
         }
         currentJob = JobState(job, id, JobKind.INSTALL, op)
+    }
+
+    /**
+     * Import a rootfs from a local archive (tar/tar.gz/tar.xz/
+     * tar.bz2/zip, or anything [ProotArchiveExtractor.extractAny] can
+     * sniff). Recorded mirror-identical to [attachExternalRootfs]:
+     * [Installation.DISTRO_EXTERNAL] + chroot, launched via the shared
+     * chroot/external path. The tree intentionally lives at
+     * /data/local/<id> (root-owned, survives even if the app data is
+     * cleared or the app removed).
+     *
+     * [archivePath] is an absolute path the app uid can read. A
+     * content:// picker source is staged app-side in the Activity;
+     * a typed host path (e.g. /data/local/tmp/rootfs.tar.xz) is staged
+     * through `su cat`, since the app uid can't read /data/local/tmp.
+     */
+    private fun importRootfsArchive(id: String, archivePath: String, label: String?) {
+        val store = InstallationStore(applicationContext)
+        if (!archivePath.startsWith("/")) {
+            rejectInstall(id, getString(R.string.install_reject_import_not_absolute, archivePath))
+            return
+        }
+        if (InstallationMethod.forKey(applicationContext, ChrootMethod.KEY) == null) {
+            rejectInstall(id, getString(R.string.install_reject_external_no_chroot))
+            return
+        }
+        val op = MutableOperation(
+            id = "install:$id",
+            title = getString(R.string.operation_title_install, id),
+            log = _log,
+            // Extraction can take minutes but there's no intermediate
+            // state to roll back — the rootfs only moves to its final
+            // /data/local spot once extract+validate pass. A cancel tap
+            // just lets the current step finish.
+            cancelConfirmation = null,
+            cancelHandler = { /* no-op — nothing to interrupt */ },
+        )
+        OperationsRegistry.register(op)
+        val (notifId, notif) = OperationsNotificationCenter.fgsAnchorFor(op.id)
+        startDataSyncForeground(notifId, notif)
+        val job = scope.launch {
+            try {
+                runInterruptible(Dispatchers.IO) {
+                    if (!Su.rootAvailable()) {
+                        throw IOException(getString(R.string.install_reject_external_requires_root))
+                    }
+                    val stagingRoot = File(applicationContext.filesDir, "import/$id")
+                    // A previous failed attempt may have left partial
+                    // files in this dir; always start the stage empty so
+                    // a retry never mixes old junk into a new rootfs.
+                    runCatching { stagingRoot.deleteRecursively() }
+                    stagingRoot.mkdirs()
+                    // 1. Stage the archive somewhere app-uid-readable. A
+                    //    picker-backed source ends up in filesDir already;
+                    //    a typed host path needs `su cat`.
+                    val staged = File(stagingRoot, "rootfs.source")
+                    val source = File(archivePath)
+                    val appStaged = source.absolutePath
+                        .startsWith(applicationContext.filesDir.absolutePath + File.separator) && source.isFile
+                    if (appStaged) {
+                        source.copyTo(staged, overwrite = true)
+                    } else {
+                        val srcQ = "'" + source.absolutePath.replace("'", "'\\''") + "'"
+                        val dstQ = "'" + staged.absolutePath.replace("'", "'\\''") + "'"
+                        appendLog("[install] staging archive via root: ${source.absolutePath}")
+                        val copy = Su.run("rm -f $dstQ; test -f $srcQ && cat $srcQ > $dstQ", timeoutSeconds = 3600)
+                        if (!copy.ok || !staged.isFile || staged.length() == 0L) {
+                            throw IOException(getString(R.string.install_reject_import_unreadable, archivePath))
+                        }
+                    }
+                    // 2. Extract app-side (format-agnostic; the picker
+                    //    keeps the source extension so sniffing rarely used).
+                    publishProgress(InstallProgress(
+                        InstallStage.EXTRACTING,
+                        getString(R.string.install_progress_import_extracting, id),
+                    ))
+                    val extractRoot = File(stagingRoot, "rootfs").apply { mkdirs() }
+                    ProotArchiveExtractor.extractAny(
+                        staged,
+                        extractRoot.absolutePath,
+                        stripPrefix = null,
+                        onLine = { appendLog("[import] $it") },
+                    )
+                    flattenSingleRoot(extractRoot)
+                    if (!File(extractRoot, "usr").isDirectory) {
+                        throw IOException(getString(R.string.install_reject_import_bad_rootfs, archivePath))
+                    }
+                    // 3. Purge any previous attempt at /data/local/<id>,
+                    //    then move the extracted tree into place as root.
+                    val targetDir = "/data/local/$id"
+                    val rootfsQ = "'" + extractRoot.absolutePath.replace("'", "'\\''") + "'"
+                    val targetQ = "'" + targetDir.replace("'", "'\\''") + "'"
+                    appendLog("[install] moving extracted rootfs to $targetDir (root)")
+                    val move = Su.run(
+                        "rm -rf $targetQ && mkdir -p $targetQ && " +
+                            "cp -a $rootfsQ/. $targetQ/ && test -d $targetQ/usr",
+                        timeoutSeconds = 3600,
+                    )
+                    if (!move.ok) {
+                        throw IOException(getString(R.string.install_reject_import_move_failed, targetDir))
+                    }
+                    // 4. Record READY, same shape as an attachment.
+                    val now = System.currentTimeMillis()
+                    val inst = Installation(
+                        id = id,
+                        distro = Installation.DISTRO_EXTERNAL,
+                        arch = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a",
+                        method = ChrootMethod.KEY,
+                        installedAtMillis = now,
+                        sourceUrl = "",
+                        state = Installation.State.READY,
+                        schemaVersion = Installation.CURRENT_SCHEMA_VERSION,
+                        installedAtAppVersionCode = me.phie.tawc.BuildConfig.VERSION_CODE.toLong(),
+                        label = label,
+                        externalRootfsPath = targetDir,
+                    )
+                    store.save(inst)
+                    AndoBrokers.refresh(applicationContext)
+                    // Drop the staged archive+extract once moved; the tree
+                    // in /data/local is the single copy.
+                    runCatching { stagingRoot.deleteRecursively() }
+                    appendLog("[install] imported rootfs archive: ${source.absolutePath} -> $targetDir ($id, ${ChrootMethod.KEY}, root)")
+                    publishProgress(InstallProgress(
+                        InstallStage.DONE,
+                        getString(R.string.install_progress_imported, label ?: id),
+                    ))
+                }
+            } catch (t: Throwable) {
+                if (t is kotlinx.coroutines.CancellationException) throw t
+                Log.e(TAG, "rootfs archive import failed", t)
+                appendLog("FAILED: ${t.message}")
+                runCatching {
+                    File(applicationContext.filesDir, "import/$id").deleteRecursively()
+                }
+                publishProgress(InstallProgress(
+                    InstallStage.FAILED,
+                    getString(R.string.operation_status_install_failed, firstLine(t.message)),
+                    errorMessage = t.message,
+                ))
+            } finally {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                clearCurrentJob(id)
+            }
+        }
+        currentJob = JobState(job, id, JobKind.INSTALL, op)
+    }
+
+    /**
+     * Delete the app-side install slot for [id] (metadata.json + any
+     * app-owned rootfs). Importing a chroot slot only ever touches the
+     * metadata here — the tree lives at /data/local/<id> and is wiped
+     * separately in the import body.
+     */
+    private fun purgeInstallSlot(id: String) {
+        val store = InstallationStore(applicationContext)
+        runCatching { store.installationDir(id).deleteRecursively() }
+        Log.i(TAG, "purged stale install slot '$id' (failed/corrupt retry)")
+    }
+
+    /**
+     * Archives routinely carry a single top-level wrapper dir
+     * (rootfs/, archlinux-rootfs/, ...). Lift a lone child up into the
+     * rootfs root so chroot paths (/usr, /bin) resolve — but only when
+     * the wrapper looks like a rootfs and the top level isn't already
+     * one. Safe no-op when the archive is unpacked flat.
+     */
+    private fun flattenSingleRoot(root: File) {
+        val children = root.listFiles()?.toList() ?: return
+        if (children.size != 1) return
+        val only = children.first()
+        if (!only.isDirectory) return
+        val topHasUsr = File(root, "usr").exists() || File(root, "bin").exists()
+        if (topHasUsr) return
+        val wrapperIsRootfs =
+            File(only, "usr").isDirectory || File(only, "bin").isDirectory
+        if (!wrapperIsRootfs) return
+        only.listFiles()?.forEach { f -> f.renameTo(File(root, f.name)) }
+        only.deleteRecursively()
     }
 
     /** Begin an uninstall for [id]. Refuses only if a job is already running. */
@@ -1055,6 +1260,11 @@ class InstallationService : Service() {
          *  skips the whole download/configure pipeline and records a
          *  READY installation pointing at the user-owned tree. */
         const val EXTRA_EXTERNAL_ROOTFS = "externalRootfsPath"
+        /** Absolute path of a local rootfs archive to import (the
+         *  "install from rootfs file" feature). Like attach, the
+         *  download/configure pipeline is skipped; the archive is
+         *  extracted and moved to /data/local/<id> as root. */
+        const val EXTRA_ARCHIVE = "archivePath"
 
         fun startInstall(
             context: Context,
@@ -1067,6 +1277,7 @@ class InstallationService : Service() {
             andoEnabled: Boolean = false,
             bootstrapFlavorId: String? = null,
             externalRootfsPath: String? = null,
+            archivePath: String? = null,
         ) {
             val i = Intent(context, InstallationService::class.java)
                 .setAction(ACTION_INSTALL)
@@ -1079,6 +1290,7 @@ class InstallationService : Service() {
             if (andoEnabled) i.putExtra(EXTRA_ANDO, true)
             if (bootstrapFlavorId != null) i.putExtra(EXTRA_BOOTSTRAP, bootstrapFlavorId)
             if (externalRootfsPath != null) i.putExtra(EXTRA_EXTERNAL_ROOTFS, externalRootfsPath)
+            if (archivePath != null) i.putExtra(EXTRA_ARCHIVE, archivePath)
             context.startForegroundService(i)
         }
 

@@ -4,6 +4,9 @@ import android.system.Os
 import com.github.luben.zstd.ZstdInputStream
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
+import org.apache.commons.compress.archivers.zip.ZipArchiveEntry
+import org.apache.commons.compress.archivers.zip.ZipArchiveInputStream
+import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
 import org.tukaani.xz.XZInputStream
 import java.io.BufferedInputStream
@@ -60,6 +63,46 @@ internal object ProotArchiveExtractor {
         openTarStream(tarball).use { tin ->
             extractStream(tin, destDir, stripPrefix, onLine)
         }
+    }
+
+    /**
+     * Extract an archive whose format is not known in advance — the
+     * linux X "install from rootfs file" path (let the user hand the
+     * app any rootfs archive). Sniffs the leading magic bytes first and
+     * falls back to the file extension, so a rootfs.tar.xz renamed to
+     * something opaque still extracts.
+     *
+     * `zip` goes through [extractZip]; every other container (plain
+     * tar, gzip/bzip2/xz/zstd-compressed tar) goes through the tar path
+     * with [openTarStream]'s extension fallback.
+     */
+    fun extractAny(
+        archive: File,
+        destDir: String,
+        stripPrefix: String?,
+        onLine: (String) -> Unit,
+    ) {
+        val magic = archive.inputStream().use { ins ->
+            val b = ByteArray(12)
+            val n = ins.read(b)
+            b.copyOf(maxOf(0, n))
+        }
+        if (magic.zipMagic()) {
+            if (stripPrefix != null) {
+                throw IOException("zip rootfs archives don't support stripPrefix")
+            }
+            extractZip(archive, destDir, onLine)
+            return
+        }
+        extract(archive, destDir, stripPrefix, onLine)
+    }
+
+    /** Zip literal extents; see [extractZip]. Minimal, but zips are a
+     *  niche rootfs container and a zip bomb is still contained by
+     *  [extractZip]'s canonical-path checks. */
+    private fun ByteArray.zipMagic(): Boolean {
+        if (size < 4 || this[0].toInt() != 'P'.code || this[1].toInt() != 'K'.code) return false
+        return this[2].toInt() == 3 && this[3].toInt() == 4
     }
 
     /**
@@ -232,21 +275,98 @@ internal object ProotArchiveExtractor {
         onLine("extracted ${deferredDirModes.size} dirs into $destDir")
     }
 
-    /** Open the tar stream, dispatching on the file extension. */
+    /** Open the tar stream, sniffing magic first, then falling back on
+     *  the file extension (extractAny reuses this for both). */
     private fun openTarStream(tarball: File): TarArchiveInputStream {
         val name = tarball.name.lowercase()
         val raw = BufferedInputStream(tarball.inputStream(), 256 * 1024)
+        val magic: ByteArray = run {
+            raw.mark(16)
+            val b = ByteArray(16)
+            val n = raw.read(b)
+            raw.reset()
+            b.copyOf(maxOf(0, n))
+        }
         val decompressed: InputStream = when {
+            magic.gzipMagic() ->
+                GzipCompressorInputStream(raw, /* decompressConcatenated = */ true)
+            magic.bzip2Magic() -> BZip2CompressorInputStream(raw)
+            magic.xzMagic() -> XZInputStream(raw)
+            magic.zstdMagic() -> ZstdInputStream(raw)
             name.endsWith(".tar.gz") || name.endsWith(".tgz") ->
                 GzipCompressorInputStream(raw, /* decompressConcatenated = */ true)
             name.endsWith(".tar.zst") || name.endsWith(".tzst") ->
                 ZstdInputStream(raw)
             name.endsWith(".tar.xz") || name.endsWith(".txz") ->
                 XZInputStream(raw)
+            name.endsWith(".tar.bz2") || name.endsWith(".tbz2") ->
+                BZip2CompressorInputStream(raw)
             name.endsWith(".tar") -> raw
             else -> throw IOException("Unsupported tarball extension: ${tarball.name}")
         }
         return TarArchiveInputStream(decompressed)
+    }
+
+    private fun ByteArray.gzipMagic(): Boolean =
+        size >= 2 && this[0].toInt() == 0x1f && this[1].toInt() == 0x8b
+
+    private fun ByteArray.bzip2Magic(): Boolean =
+        size >= 3 && this[0].toInt() == 'B'.code && this[1].toInt() == 'Z'.code &&
+            this[2].toInt() == 'h'.code
+
+    private fun ByteArray.xzMagic(): Boolean =
+        size >= 6 && this[0].toInt() == 0xfd && this[1].toInt() == '7'.code &&
+            this[2].toInt() == 'z'.code && this[3].toInt() == 'X'.code &&
+            this[4].toInt() == 'Z'.code && this[5].toInt() == 0x00
+
+    private fun ByteArray.zstdMagic(): Boolean =
+        size >= 4 && this[0].toInt() == 0x28 && this[1].toInt() == 0xb5 &&
+            this[2].toInt() == 0x2f && this[3].toInt() == 0xfd
+
+    /**
+     * Zip variant of [extract]: path containment like the tar path, no
+     * stripPrefix, symlink entries honoured when the zip carries unix
+     * modes. Device nodes and unrecognised modes are skipped quietly —
+     * rootfs zips almost never carry them.
+     */
+    private fun extractZip(zip: File, destDir: String, onLine: (String) -> Unit) {
+        val dest = File(destDir).apply { mkdirs() }
+        val destReal = dest.canonicalFile
+        val destPrefix = destReal.absolutePath + File.separator
+        ZipArchiveInputStream(BufferedInputStream(zip.inputStream(), 256 * 1024)).use { zin ->
+            var count = 0
+            while (true) {
+                if (Thread.interrupted()) {
+                    throw InterruptedIOException("extract cancelled")
+                }
+                val entry: ZipArchiveEntry = zin.nextZipEntry ?: break
+                val rel = entry.name.trimStart('/').removeSuffix("/")
+                if (rel.isEmpty()) continue
+                val candidate = File(dest, rel).canonicalFile
+                val abs = candidate.absolutePath
+                if (abs != destReal.absolutePath && !abs.startsWith(destPrefix)) {
+                    throw IOException("zip entry escapes rootfs: rel=\"$rel\" abs=\"$abs\"")
+                }
+                if (entry.isDirectory) {
+                    candidate.mkdirs()
+                    continue
+                }
+                if (entry.isUnixSymlink) {
+                    val target = entry.link ?: continue
+                    candidate.parentFile?.mkdirs()
+                    runCatching { Os.symlink(target, candidate.absolutePath) }
+                    continue
+                }
+                candidate.parentFile?.mkdirs()
+                candidate.outputStream().use { out -> zin.copyTo(out) }
+                val mode = entry.unixMode
+                if (mode != 0 && (mode and 0b001_001_001) != 0) {
+                    candidate.setExecutable(true, false)
+                }
+                count++
+            }
+            onLine("extracted $count files from zip")
+        }
     }
 
     /**

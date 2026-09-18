@@ -2,6 +2,7 @@ package me.phie.tawc.install
 
 import android.content.Intent
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
@@ -15,6 +16,7 @@ import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.color.MaterialColors
@@ -26,6 +28,9 @@ import me.phie.tawc.ui.buildChildScreen
 import me.phie.tawc.ui.primaryButton
 import me.phie.tawc.ui.tonalButton
 import me.phie.tawc.ui.verticalLp
+import java.io.File
+import java.io.IOException
+import java.util.Locale
 
 /**
  * "Install new distro" screen. Form-only: distro / label / method /
@@ -55,7 +60,58 @@ class InstallActivity : AppCompatActivity() {
     private var attachPathRow: LinearLayout? = null
     private var savedAttachPath: String? = null
 
-    // Row refs captured during build so [updateAttachRows] can show /
+    /** Import-from-file toggle + path row (chroot-root archive extract
+     *  to /data/local/<name>). Mutually exclusive with attach mode. */
+    private var importMode: Boolean = false
+    private lateinit var importToggle: CheckBox
+    private lateinit var importPathField: EditText
+    private var importPathRow: LinearLayout? = null
+    private var savedImportPath: String? = null
+    /** App-staged path set by the Browse picker; typed paths use the
+     *  field text directly — this is only needed when the user picked a
+     *  content:// source that was copied into filesDir. */
+    private var chosenImportPath: String? = null
+
+    private val importPicker = registerForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri: Uri? ->
+        uri ?: return@registerForActivityResult
+        val tmpDir = File(filesDir, "import-incoming").apply { mkdirs() }
+        val safe = uri.lastPathSegment
+            ?.replace("[^A-Za-z0-9._-]".toRegex(), "_")
+            ?.lowercase(Locale.US)
+            ?.take(48)
+            ?.ifEmpty { "rootfs" }
+        val out = File(tmpDir, "rootfs-${System.currentTimeMillis()}-${safe}")
+        // Rootfs archives can be giga-scale; copy off the main thread
+        // and only touch views from the UI thread once it lands.
+        Thread {
+            val result = runCatching {
+                contentResolver.openInputStream(uri)?.use { ins ->
+                    out.outputStream().use { outs -> ins.copyTo(outs) }
+                }
+                if (out.length() == 0L) throw IOException("empty file")
+            }
+            runOnUiThread {
+                result.fold(
+                    onSuccess = {
+                        chosenImportPath = out.absolutePath
+                        if (::importPathField.isInitialized) importPathField.setText(chosenImportPath)
+                        revalidate()
+                    },
+                    onFailure = { e ->
+                        android.widget.Toast.makeText(
+                            this,
+                            getString(R.string.install_import_read_failed, e.message),
+                            android.widget.Toast.LENGTH_LONG,
+                        ).show()
+                    },
+                )
+            }
+        }.start()
+    }
+
+    // Row refs captured during build so [updateExternalRows] can show /
     // hide the "create a new install" sections when attach mode flips.
     private var distroPickerView: View? = null
     private var methodPickerView: View? = null
@@ -152,6 +208,9 @@ class InstallActivity : AppCompatActivity() {
         andoEnabled = savedInstanceState?.getBoolean(KEY_ANDO) == true
         attachMode = savedInstanceState?.getBoolean(KEY_ATTACH_MODE) == true
         savedAttachPath = savedInstanceState?.getString(KEY_ATTACH_PATH)
+        importMode = savedInstanceState?.getBoolean(KEY_IMPORT_MODE) == true
+        savedImportPath = savedInstanceState?.getString(KEY_IMPORT_PATH)
+        chosenImportPath = savedInstanceState?.getString(KEY_IMPORT_CHOSEN)
         pendingBinds.clear()
         savedInstanceState?.getString(KEY_BINDS)?.let { savedBinds ->
             pendingBinds.addAll(
@@ -197,6 +256,11 @@ class InstallActivity : AppCompatActivity() {
         if (::attachPathField.isInitialized) {
             outState.putString(KEY_ATTACH_PATH, attachPathField.text.toString())
         }
+        outState.putBoolean(KEY_IMPORT_MODE, importMode)
+        if (::importPathField.isInitialized) {
+            outState.putString(KEY_IMPORT_PATH, importPathField.text.toString())
+        }
+        chosenImportPath?.let { outState.putString(KEY_IMPORT_CHOSEN, it) }
         outState.putString(KEY_BINDS, ExternalBind.toJsonArray(pendingBinds).toString())
     }
 
@@ -215,6 +279,11 @@ class InstallActivity : AppCompatActivity() {
         // chroot method).
         s.addView(buildAttachToggle(), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
 
+        // Import-mode toggle: "install from a rootfs file" (root-only
+        // chroot extract to /data/local/<name>). Mutually exclusive
+        // with attach — both are external-rootfs sources.
+        s.addView(buildImportToggle(), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
+
         val distroPicker = buildDistroPicker(available)
         distroPickerView = distroPicker
         s.addView(distroPicker, verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
@@ -223,6 +292,7 @@ class InstallActivity : AppCompatActivity() {
         // "what do we run" inputs; flipping the toggle swaps one for the
         // other.
         s.addView(buildAttachPathRow(pad), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
+        s.addView(buildImportPathRow(pad), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
 
         // Dev-only bootstrap-flavor radio row, between the distro
         // picker and the label field. Rendered only when the selected
@@ -316,7 +386,7 @@ class InstallActivity : AppCompatActivity() {
 
         // Initial validation pass — populates resolvedId, location row,
         // and Install button enabled-state from the default label.
-        updateAttachRows()
+        updateExternalRows()
         revalidate()
         return s
     }
@@ -330,7 +400,26 @@ class InstallActivity : AppCompatActivity() {
             isChecked = attachMode
             setOnCheckedChangeListener { _, checked ->
                 attachMode = checked
-                updateAttachRows()
+                if (checked) {
+                    importMode = false
+                    importToggle.isChecked = false
+                }
+                updateExternalRows()
+                revalidate()
+            }
+        }
+
+    private fun buildImportToggle(): CheckBox =
+        CheckBox(this).apply {
+            text = getString(R.string.install_import_toggle)
+            isChecked = importMode
+            setOnCheckedChangeListener { _, checked ->
+                importMode = checked
+                if (checked) {
+                    attachMode = false
+                    attachToggle.isChecked = false
+                }
+                updateExternalRows()
                 revalidate()
             }
         }
@@ -366,18 +455,59 @@ class InstallActivity : AppCompatActivity() {
         return container
     }
 
-    /** Show/hide the "new install" sections vs the attach path row. */
-    private fun updateAttachRows() {
-        distroPickerView?.visibility = if (attachMode) View.GONE else View.VISIBLE
+    private fun buildImportPathRow(pad: Int): LinearLayout {
+        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val pathRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+        }
+        importPathField = EditText(this).apply {
+            setText(savedImportPath.orEmpty())
+            isSingleLine = true
+            hint = getString(R.string.install_import_path_label)
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                override fun afterTextChanged(s: Editable?) {
+                    // The picker path overwrites the field; an explicit
+                    // user edit wins over any picker staging path.
+                    chosenImportPath = null
+                    revalidate()
+                }
+            })
+        }
+        pathRow.addView(importPathField, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        pathRow.addView(tonalButton(getString(R.string.install_import_browse)) {
+            importPicker.launch("*/*")
+        })
+        container.addView(pathRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        val note = TextView(this).apply {
+            text = getString(R.string.install_import_note)
+            textSize = 12f
+            alpha = 0.8f
+        }
+        container.addView(
+            note,
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = pad / 4 },
+        )
+        importPathRow = container
+        return container
+    }
+
+    /** Show/hide the "new install" sections vs the attach/import row. */
+    private fun updateExternalRows() {
+        val externalMode = attachMode || importMode
+        distroPickerView?.visibility = if (externalMode) View.GONE else View.VISIBLE
         attachPathRow?.visibility = if (attachMode) View.VISIBLE else View.GONE
-        methodPickerView?.visibility = if (attachMode) View.GONE else View.VISIBLE
-        helpLinkView?.visibility = if (attachMode) View.GONE else View.VISIBLE
-        changeableLaterView?.visibility = if (attachMode) View.GONE else View.VISIBLE
-        cacheProxyRowView?.visibility = if (attachMode) View.GONE else View.VISIBLE
-        if (attachMode) {
+        importPathRow?.visibility = if (importMode) View.VISIBLE else View.GONE
+        methodPickerView?.visibility = if (externalMode) View.GONE else View.VISIBLE
+        helpLinkView?.visibility = if (externalMode) View.GONE else View.VISIBLE
+        changeableLaterView?.visibility = if (externalMode) View.GONE else View.VISIBLE
+        cacheProxyRowView?.visibility = if (externalMode) View.GONE else View.VISIBLE
+        if (externalMode) {
             // The dev-only flavor row and the binds row both derive their
             // visibility from selection state below; pin them hidden while
-            // attaching.
+            // in an external-rootfs mode.
             bootstrapRow?.visibility = View.GONE
             bindsRow?.visibility = View.GONE
         } else {
@@ -611,17 +741,38 @@ class InstallActivity : AppCompatActivity() {
         if (!::labelField.isInitialized) return
         val rawLabel = labelField.text.toString().trim()
         val slug = if (rawLabel.isEmpty()) null else Installation.slugifyLabel(rawLabel)
-        val collides = slug != null && store.installationDir(slug).exists()
-        val pathOk = !attachMode || attachPathOk()
+        val collides = slug != null && store.installationDir(slug).exists() && if (importMode) {
+            // Import retries a stale failed/corrupt attempt for the same
+            // slug from scratch (the service purges it); any other state
+            // at this slug is a real existing install and still blocks.
+            when (store.load(slug)?.state) {
+                null -> false
+                Installation.State.FAILED,
+                Installation.State.CORRUPT -> false
+                else -> true
+            }
+        } else {
+            true
+        }
+        val pathOk = when {
+            attachMode -> attachPathOk()
+            importMode -> importPathOk()
+            else -> true
+        }
+        val externalMode = attachMode || importMode
         resolvedId = slug?.takeUnless { collides }?.takeIf { pathOk }
 
         if (::locationLabel.isInitialized) {
             locationLabel.text = when {
                 attachMode && !pathOk -> getString(R.string.install_attach_path_invalid)
+                importMode && !pathOk -> getString(R.string.install_import_path_invalid)
                 rawLabel.isEmpty() -> getString(R.string.install_label_empty)
                 slug == null -> getString(R.string.install_label_invalid)
                 collides -> getString(R.string.install_already_installed_at, store.installationDir(slug).absolutePath)
-                attachMode -> attachPathField.text.toString().trim()
+                externalMode -> when {
+                    attachMode -> attachPathField.text.toString().trim()
+                    else -> importPathField.text.toString().trim()
+                }
                 else -> store.installationDir(slug).absolutePath
             }
             val colorAttr = if (resolvedId == null) {
@@ -635,7 +786,11 @@ class InstallActivity : AppCompatActivity() {
         if (::installButton.isInitialized) {
             installButton.isEnabled = (resolvedId != null)
             installButton.text = getString(
-                if (attachMode) R.string.action_attach else R.string.action_install,
+                when {
+                    attachMode -> R.string.action_attach
+                    importMode -> R.string.action_import
+                    else -> R.string.action_install
+                }
             )
         }
     }
@@ -644,6 +799,13 @@ class InstallActivity : AppCompatActivity() {
     private fun attachPathOk(): Boolean {
         if (!::attachPathField.isInitialized) return false
         val p = attachPathField.text.toString().trim()
+        return p.isNotEmpty() && p.startsWith("/")
+    }
+
+    /** Absolute, non-blank path for the "install from a rootfs file" mode. */
+    private fun importPathOk(): Boolean {
+        if (!::importPathField.isInitialized) return false
+        val p = importPathField.text.toString().trim()
         return p.isNotEmpty() && p.startsWith("/")
     }
 
@@ -760,11 +922,11 @@ class InstallActivity : AppCompatActivity() {
     }
 
     private fun beginInstall() {
-        // Attach always runs via the root chroot method, so root is
-        // required there too; proot/tawcroot are rootless by definition,
-        // so a missing-root device fails this check only if the user
-        // picked chroot or attach mode.
-        if ((attachMode || selectedMethod == ChrootMethod.KEY) && !Su.rootAvailable()) {
+        // Attach/import always run via the root chroot method, so root
+        // is required there too; proot/tawcroot are rootless by
+        // definition, so a missing-root device fails this check only if
+        // the user picked chroot / attach / import mode.
+        if ((attachMode || importMode || selectedMethod == ChrootMethod.KEY) && !Su.rootAvailable()) {
             // We don't have a panel anymore; surface as a quick
             // toast-style status on the form. Service-level gate would
             // also refuse, but a fail-fast at the form level avoids the
@@ -774,6 +936,20 @@ class InstallActivity : AppCompatActivity() {
                 getString(R.string.install_root_unavailable),
                 android.widget.Toast.LENGTH_LONG,
             ).show()
+            return
+        }
+
+        if (importMode) {
+            val targetId = resolvedId ?: return  // button disabled when null
+            val path = chosenImportPath ?: importPathField.text.toString().trim()
+            if (!path.startsWith("/")) return
+            val labelText = labelField.text.toString().trim().takeIf { it.isNotEmpty() }
+            InstallationService.startInstall(
+                this, targetId, ChrootMethod.KEY, null, labelText,
+                archivePath = path,
+            )
+            startActivity(LogScreenActivity.intentFor(this, "install:$targetId"))
+            finish()
             return
         }
 
@@ -853,6 +1029,9 @@ class InstallActivity : AppCompatActivity() {
         private const val KEY_BOOTSTRAP = "tawc.install.bootstrap"
         private const val KEY_ATTACH_MODE = "tawc.install.attachMode"
         private const val KEY_ATTACH_PATH = "tawc.install.attachPath"
+        private const val KEY_IMPORT_MODE = "tawc.install.importMode"
+        private const val KEY_IMPORT_PATH = "tawc.install.importPath"
+        private const val KEY_IMPORT_CHOSEN = "tawc.install.importChosen"
         /** Suggested default for the attach path field. */
         private const val DEFAULT_ATTACH_PATH = "/data/local/debian"
     }
