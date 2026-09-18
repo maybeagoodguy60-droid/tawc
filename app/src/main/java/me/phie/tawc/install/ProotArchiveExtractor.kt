@@ -10,6 +10,7 @@ import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
 import org.tukaani.xz.XZInputStream
 import java.io.BufferedInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -352,9 +353,16 @@ internal object ProotArchiveExtractor {
                     continue
                 }
                 if (entry.isUnixSymlink) {
-                    val target = entry.link ?: continue
+                    // Zip symlinks store the target path as the entry's
+                    // data (there's no getLink() in this commons-compress
+                    // line), so read it out of the stream itself.
                     candidate.parentFile?.mkdirs()
-                    runCatching { Os.symlink(target, candidate.absolutePath) }
+                    val buf = ByteArrayOutputStream()
+                    zin.copyTo(buf)
+                    val linkTarget = buf.toString(Charsets.UTF_8).trim()
+                    if (linkTarget.isNotEmpty()) {
+                        runCatching { Os.symlink(linkTarget, candidate.absolutePath) }
+                    }
                     continue
                 }
                 candidate.parentFile?.mkdirs()
