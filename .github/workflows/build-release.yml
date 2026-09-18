@@ -1,0 +1,96 @@
+name: Build signed release APK
+
+# Production release build using the repo's own scripts/build-release-apk.sh
+# (stock; no source changes). Signs with the keystore held in repo secrets.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ANDROID_HOME: /usr/local/lib/android/sdk
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc \
+            /usr/local/lib/android/sdk/ndk /usr/local/share/boost || true
+
+      - name: Set up JDK 21 (also provides keytool)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install host packages (release set: libhybris,cpu + tawcroot)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential make pkg-config curl libarchive-tools file \
+            meson ninja-build bison \
+            autoconf automake libtool libtool-bin libltdl-dev \
+            perl python3 python3-libxml2 xsltproc libexpat1-dev \
+            libwayland-dev libwayland-bin libwayland-egl-backend-dev \
+            wayland-protocols \
+            libvulkan-dev patchelf \
+            libx11-dev libx11-xcb-dev libxcb1-dev \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu libc6-arm64-cross \
+            linux-libc-dev-arm64-cross
+
+      - name: Upgrade meson
+        run: |
+          python3 -m pip install --user --break-system-packages "meson>=1.4"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install Android platform, build-tools and NDK
+        run: |
+          SDKMGR="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)"
+          yes | "$SDKMGR" --licenses >/dev/null || true
+          "$SDKMGR" --install \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;27.2.12479018"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      - name: Install Rust (rustup)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh
+          sh /tmp/rustup.sh -y --profile minimal --default-toolchain none --no-modify-path
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+
+      - name: Build, zipalign, sign and verify release APK
+        env:
+          KEYSTORE_PATH: ${{ runner.temp }}/android-keys/tawc-release.jks
+          KEYSTORE_PASS: ${{ secrets.TAWC_KEYSTORE_PASS }}
+          KEY_PASS: ${{ secrets.TAWC_KEY_PASS }}
+          KEY_ALIAS: tawc
+        run: |
+          mkdir -p "$(dirname "$KEYSTORE_PATH")"
+          printf '%s' "${{ secrets.TAWC_KEYSTORE_B64 }}" | base64 -d > "$KEYSTORE_PATH"
+          keytool -list -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASS" | grep -E "PrivateKeyEntry"
+          scripts/build-release-apk.sh
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: tawc-release
+          path: app/build/outputs/apk/release/tawc-v*.apk
+          if-no-files-found: error
+          retention-days: 30
