@@ -1,0 +1,102 @@
+name: Build tawc debug APK
+
+# Stock build of the pinned tawc tree: no source changes, the repo's own
+# scripts/build-app.sh does all the work. Mirrors the host-package list in
+# notes/building.md (the same set the tested F-Droid recipe installs) plus
+# Mesa's Python build deps for the gfxstream / libhybris-zink backends.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk \
+            /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install host packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential make pkg-config curl libarchive-tools file \
+            meson ninja-build bison flex \
+            autoconf automake libtool libtool-bin libltdl-dev \
+            perl python3 python3-libxml2 python3-mako python3-yaml xsltproc \
+            libexpat1-dev \
+            libwayland-dev libwayland-bin libwayland-egl-backend-dev \
+            wayland-protocols \
+            libvulkan-dev patchelf \
+            libx11-dev libx11-xcb-dev libxcb1-dev \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu libc6-arm64-cross \
+            linux-libc-dev-arm64-cross \
+            libclang-dev llvm zstd
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform, build-tools and NDK
+        run: |
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;27.2.12479018"
+          yes | sdkmanager --licenses >/dev/null || true
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      - name: Install Rust (rustup)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh
+          sh /tmp/rustup.sh -y --profile minimal --default-toolchain none --no-modify-path
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install cargo-ndk and bindgen
+        run: |
+          cargo install cargo-ndk --version 4.1.2 --locked
+          cargo install bindgen-cli --locked
+
+      - name: Show toolchain
+        run: |
+          rustup show
+          rustc --version
+          cargo ndk --version
+          java -version
+          ./gradlew --version
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+
+      # Stock, full default build: all four graphics backends
+      # (libhybris, libhybris-zink, gfxstream, cpu), Xwayland on, both exec
+      # methods, debootstrap packages flavor (debug default). arm64-v8a only.
+      - name: Build debug APK (arm64-v8a, default graphics + Xwayland)
+        run: scripts/build-app.sh --abi=arm64-v8a
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: tawc-debug-arm64-v8a
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
