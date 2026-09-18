@@ -58,6 +58,14 @@ class ChrootMethod(private val context: Context) : InstallationMethod {
         // relying on in-tree copies. Same asset-bind shape tawcroot uses.
         val external = store.idForRootfs(rootfs)?.let { store.load(it)?.externalRootfsPath != null } == true
         val hybrisSrc = File(context.filesDir, "libhybris").absolutePath
+        // Host-side copy of the glvnd vendor JSON; non-null only when
+        // the libhybris asset extracted. Non-null also gates the whole
+        // external GL block below.
+        val glvndFile = if (external && CompositorService.ensureLibhybrisExtracted(context)) {
+            LibhybrisInstallProvider.ensureGlvndVendorFile(context)
+        } else {
+            null
+        }
         if (!external) {
             LinkerConfig.install(rootfs)
         }
@@ -72,10 +80,13 @@ class ChrootMethod(private val context: Context) : InstallationMethod {
         val script = buildString {
             appendLine("set -eu")
             appendLine(ChrootMounter.mountScript(rootfs, appPaths.shareDir.absolutePath, andoHostDir))
-            if (external && CompositorService.ensureLibhybrisExtracted(context)) {
+            if (external && glvndFile != null) {
                 val hybrisSrcQ = Sh.quote(hybrisSrc)
                 val guestHybris = "$rootfs/usr/lib/hybris"
                 val guestHybrisQ = Sh.quote(guestHybris)
+                val guestGlvndDir = "$rootfs/usr/share/glvnd/egl_vendor.d"
+                val guestGlvndDirQ = Sh.quote(guestGlvndDir)
+                val glvndQ = Sh.quote(glvndFile.absolutePath)
                 appendLine(
                     """
                     # Attached rootfs has no in-tree libhybris (install
@@ -100,6 +111,16 @@ class ChrootMethod(private val context: Context) : InstallationMethod {
                             fi
                         fi
                     fi
+                    # glvnd vendor JSON: without it the guest libEGL
+                    # dispatcher never sees libhybris and Mesa is used,
+                    # which has no DRM/GBM backend here — GL clients
+                    # then stay alive but never present. Same layout a
+                    # stock install's TawcInstaller pass lays down
+                    # (00_ wins lex-order over the distro's 50_mesa).
+                    mkdir -p $guestGlvndDirQ
+                    cp $glvndQ $guestGlvndDirQ/00_libhybris.json 2>/dev/null || \
+                        echo "[linuxx] glvnd vendor JSON not installed; EGL may be software"
+                    chmod 644 $guestGlvndDirQ/00_libhybris.json 2>/dev/null || true
                     """.trimIndent()
                 )
             }

@@ -119,11 +119,7 @@ internal object LibhybrisInstallProvider : TawcInstallProvider {
         // have a stable file to copy from. Sibling to <filesDir>/libhybris/
         // so the periodic re-extract (which atomically replaces the
         // libhybris dir) doesn't wipe our generated content.
-        val glvndSrc = File(context.filesDir, "libhybris-glvnd/00_libhybris.json")
-        glvndSrc.parentFile?.mkdirs()
-        if (!glvndSrc.exists() || glvndSrc.readText() != glvndVendorJson) {
-            glvndSrc.writeText(glvndVendorJson)
-        }
+        val glvndSrc = ensureGlvndVendorFile(context) ?: return emptyList()
         entries += TawcInstall(
             src = glvndSrc.absolutePath,
             dest = "$GUEST_GLVND_DIR/00_libhybris.json",
@@ -183,5 +179,22 @@ internal object LibhybrisInstallProvider : TawcInstallProvider {
                 )
             }
         }
+    }
+
+    /**
+     * Ensure `<filesDir>/libhybris-glvnd/00_libhybris.json` exists and
+     * returns it. Sibling of the extracted libhybris tree (sibling so
+     * the periodic atomic re-extract never wipes it). Shared by
+     * [entries] and by [ChrootMethod]'s external-tree materialization,
+     * which has no TawcInstaller pass to lean on.
+     */
+    fun ensureGlvndVendorFile(context: Context): File? {
+        if (!CompositorService.ensureLibhybrisExtracted(context)) return null
+        val glvndSrc = File(context.filesDir, "libhybris-glvnd/00_libhybris.json")
+        glvndSrc.parentFile?.mkdirs()
+        if (!glvndSrc.exists() || glvndSrc.readText() != glvndVendorJson) {
+            glvndSrc.writeText(glvndVendorJson)
+        }
+        return glvndSrc
     }
 }
