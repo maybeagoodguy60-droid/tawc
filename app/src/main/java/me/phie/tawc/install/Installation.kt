@@ -90,8 +90,22 @@ data class Installation(
      * leaning on the default forever.
      */
     val bootstrapFlavor: String = FLAVOR_TARBALL,
+    /**
+     * Host path of an *external* rootfs this slot is attached to — the
+     * linux X "attach an existing rootfs" feature. When set, the rootfs
+     * lives outside app storage (e.g. `/data/local/debian`, an OS-level
+     * container the user already runs) and is **not** owned by the app:
+     * uninstall detaches the slot and never deletes the tree, and
+     * nothing app-side is installed into it (no configure, no
+     * [TawcInstaller] providers, no package-manager bootstrap). Entry is
+     * always via the root `[[ChrootMethod]]`. Null for normal
+     * tarball/packages installs, whose rootfs lives at
+     * `<app data>/distros/<id>/rootfs/`.
+     */
+    val externalRootfsPath: String? = null,
 ) {
-    fun rootfsDir(store: InstallationStore): File = store.rootfsDir(id)
+    fun rootfsDir(store: InstallationStore): File =
+        externalRootfsPath?.let(::File) ?: store.rootfsDir(id)
     fun metadataFile(store: InstallationStore): File = store.metadataFile(id)
 
     fun toJson(): String = JSONObject().apply {
@@ -104,6 +118,7 @@ data class Installation(
         put("installedAtAppVersionCode", installedAtAppVersionCode)
         put("sourceUrl", sourceUrl)
         put("bootstrapFlavor", bootstrapFlavor)
+        if (externalRootfsPath != null) put("externalRootfsPath", externalRootfsPath)
         put("state", state.name)
         if (failure != null) put("failure", failure)
         if (label != null) put("label", label)
@@ -155,6 +170,9 @@ data class Installation(
         const val DISTRO_MANJARO = "manjaro"
         const val DISTRO_VOID = "void"
         const val DISTRO_DEBIAN_SID = "debian-sid"
+        /** Synthetic distro key recorded by "attach existing rootfs" slots
+         *  (see [externalRootfsPath]). Not installable from a download. */
+        const val DISTRO_EXTERNAL = "external"
         // Kept as constants for the metadata schema; the runtime
         // mapping to InstallationMethod implementations lives in
         // [InstallationMethod.forKey] and the impl objects' KEY fields.
@@ -280,6 +298,8 @@ data class Installation(
                 else emptyList(),
                 andoEnabled = obj.optBoolean("andoEnabled", false),
                 bootstrapFlavor = obj.optString("bootstrapFlavor", FLAVOR_TARBALL),
+                externalRootfsPath = if (obj.has("externalRootfsPath") && !obj.isNull("externalRootfsPath"))
+                    obj.getString("externalRootfsPath") else null,
             )
         }
 

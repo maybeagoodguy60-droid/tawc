@@ -549,7 +549,7 @@ class TaskManagerActivity : AppCompatActivity() {
                 withContext(Dispatchers.IO) {
                     runInterruptible {
                         ProcessScanner.killAllInRootfs(
-                            rootfsPath = store.rootfsDir(inst.id).absolutePath,
+                            rootfsPath = inst.rootfsDir(store).absolutePath,
                             installId = inst.id,
                             includeChroot = inst.method == ChrootMethod.KEY,
                             log = {},

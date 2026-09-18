@@ -155,7 +155,7 @@ class DistroInfoActivity : AppCompatActivity() {
             ),
             rowLp(pad),
         )
-        val rootfsPath = store.rootfsDir(installation.id).absolutePath
+        val rootfsPath = installation.rootfsDir(store).absolutePath
         val rootfsRow = infoRow(getString(R.string.distro_info_row_rootfs_path), rootfsPath)
         rootfsRow.gravity = android.view.Gravity.CENTER_VERTICAL
         rootfsRow.addView(
@@ -344,7 +344,15 @@ class DistroInfoActivity : AppCompatActivity() {
         val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(getString(R.string.distro_info_delete_title, name))
             .setMessage(
-                getString(R.string.distro_info_delete_message, store.rootfsDir(installation.id).absolutePath)
+                // Attached external rootfs: uninstall detaches — the
+                // user-owned tree is never deleted — so say so plainly
+                // instead of echoing the tree path as if it were the
+                // thing being removed.
+                if (installation.externalRootfsPath != null) {
+                    getString(R.string.distro_info_detach_message, installation.externalRootfsPath)
+                } else {
+                    getString(R.string.distro_info_delete_message, installation.rootfsDir(store).absolutePath)
+                }
             )
             .setNegativeButton(getString(R.string.action_cancel), null)
             .setPositiveButton(getString(R.string.action_delete)) { _, _ ->

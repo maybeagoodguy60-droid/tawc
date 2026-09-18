@@ -92,7 +92,7 @@ internal object RunCommandOp {
             Log.w(TAG, "open log screen: ${t.message}")
         }
 
-        val rootfs = InstallationStore(app).rootfsDir(installation.id).absolutePath
+        val rootfs = installation.rootfsDir(InstallationStore(app)).absolutePath
 
         thread(name = "tawc-runcmd-starter", isDaemon = true) {
             if (cancelled.get()) return@thread

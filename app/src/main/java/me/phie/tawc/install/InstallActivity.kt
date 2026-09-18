@@ -46,6 +46,23 @@ class InstallActivity : AppCompatActivity() {
     private var selectedMethod: String? = null
     private var selectedDistro: String? = null
 
+    /** Whether the form is in "attach an existing rootfs" mode (the
+     *  linux X external-rootfs feature). When on, the distro / method /
+     *  binds / proxy rows hide and a path field takes their place. */
+    private var attachMode: Boolean = false
+    private lateinit var attachToggle: CheckBox
+    private lateinit var attachPathField: EditText
+    private var attachPathRow: LinearLayout? = null
+    private var savedAttachPath: String? = null
+
+    // Row refs captured during build so [updateAttachRows] can show /
+    // hide the "create a new install" sections when attach mode flips.
+    private var distroPickerView: View? = null
+    private var methodPickerView: View? = null
+    private var helpLinkView: View? = null
+    private var changeableLaterView: View? = null
+    private var cacheProxyRowView: View? = null
+
     /** (distro key, radio) for every rendered distro option; the
      *  picker manages exclusivity across the supported/other split
      *  itself. See [buildDistroPicker]. */
@@ -133,6 +150,8 @@ class InstallActivity : AppCompatActivity() {
             else -> false
         }
         andoEnabled = savedInstanceState?.getBoolean(KEY_ANDO) == true
+        attachMode = savedInstanceState?.getBoolean(KEY_ATTACH_MODE) == true
+        savedAttachPath = savedInstanceState?.getString(KEY_ATTACH_PATH)
         pendingBinds.clear()
         savedInstanceState?.getString(KEY_BINDS)?.let { savedBinds ->
             pendingBinds.addAll(
@@ -174,6 +193,10 @@ class InstallActivity : AppCompatActivity() {
         outState.putBoolean(KEY_OTHER_DISTROS, otherDistrosExpanded)
         useCacheProxy?.let { outState.putBoolean(KEY_USE_PROXY, it) }
         outState.putBoolean(KEY_ANDO, andoEnabled)
+        outState.putBoolean(KEY_ATTACH_MODE, attachMode)
+        if (::attachPathField.isInitialized) {
+            outState.putString(KEY_ATTACH_PATH, attachPathField.text.toString())
+        }
         outState.putString(KEY_BINDS, ExternalBind.toJsonArray(pendingBinds).toString())
     }
 
@@ -187,7 +210,19 @@ class InstallActivity : AppCompatActivity() {
         // anyway.
         val available = DistroRegistry.availableForHost()
 
-        s.addView(buildDistroPicker(available), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
+        // Attach-mode toggle: "use an existing rootfs" instead of
+        // installing fresh. Root-only, ships in release (needs the
+        // chroot method).
+        s.addView(buildAttachToggle(), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
+
+        val distroPicker = buildDistroPicker(available)
+        distroPickerView = distroPicker
+        s.addView(distroPicker, verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
+
+        // The attach path row sits next to the distro picker — both are
+        // "what do we run" inputs; flipping the toggle swaps one for the
+        // other.
+        s.addView(buildAttachPathRow(pad), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
 
         // Dev-only bootstrap-flavor radio row, between the distro
         // picker and the label field. Rendered only when the selected
@@ -210,7 +245,9 @@ class InstallActivity : AppCompatActivity() {
         // would compare a single option against nothing. Saved
         // instance state overrides the default for rotation.
         if (!EnabledMethods.onlyOne) {
-            s.addView(buildMethodPicker(), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2))
+            val mp = buildMethodPicker()
+            methodPickerView = mp
+            s.addView(mp, verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2))
         } else {
             // Pin the single enabled method as the selection so
             // beginInstall doesn't fall back to tawcroot's KEY when
@@ -222,14 +259,16 @@ class InstallActivity : AppCompatActivity() {
             // "What's the difference?" link to the install method info
             // page. Borderless text button so it reads as a help affordance,
             // not a primary action.
-            s.addView(
-                MaterialButton(this, null, com.google.android.material.R.attr.borderlessButtonStyle).apply {
+            val help = MaterialButton(this, null, com.google.android.material.R.attr.borderlessButtonStyle).apply {
                     text = getString(R.string.install_help_methods)
                     setTextColor(getColor(R.color.tawc_accent))
                     setOnClickListener {
                         startActivity(Intent(this@InstallActivity, InstallMethodInfoActivity::class.java))
                     }
-                },
+                }
+            helpLinkView = help
+            s.addView(
+                help,
                 verticalLp(WRAP_CONTENT, WRAP_CONTENT, bottomMargin = pad),
             )
         }
@@ -237,12 +276,14 @@ class InstallActivity : AppCompatActivity() {
         // Header for the trailing post-install-editable settings (ando,
         // binds): both are also on the distro settings page, so say so
         // here and spare the user agonizing over them mid-install.
-        s.addView(
-            TextView(this).apply {
+        val changeableLater = TextView(this).apply {
                 text = getString(R.string.install_changeable_later)
                 textSize = 13f
                 alpha = 0.7f
-            },
+            }
+        changeableLaterView = changeableLater
+        s.addView(
+            changeableLater,
             verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 4),
         )
 
@@ -265,7 +306,9 @@ class InstallActivity : AppCompatActivity() {
         // — production must never even ask the user about a localhost
         // proxy URL, since it'd never be reachable from a packaged APK.
         if (me.phie.tawc.BuildConfig.DEBUG) {
-            s.addView(buildCacheProxyRow(), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
+            val cc = buildCacheProxyRow()
+            cacheProxyRowView = cc
+            s.addView(cc, verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
         }
 
         installButton = primaryButton(getString(R.string.action_install)) { beginInstall() }
@@ -273,8 +316,74 @@ class InstallActivity : AppCompatActivity() {
 
         // Initial validation pass — populates resolvedId, location row,
         // and Install button enabled-state from the default label.
+        updateAttachRows()
         revalidate()
         return s
+    }
+
+    /**
+     * The attach-mode toggle + hidden path row builder.
+     */
+    private fun buildAttachToggle(): CheckBox =
+        CheckBox(this).apply {
+            text = getString(R.string.install_attach_toggle)
+            isChecked = attachMode
+            setOnCheckedChangeListener { _, checked ->
+                attachMode = checked
+                updateAttachRows()
+                revalidate()
+            }
+        }
+
+    private fun buildAttachPathRow(pad: Int): LinearLayout {
+        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val title = TextView(this).apply {
+            text = getString(R.string.install_attach_path_label)
+            textSize = 14f
+        }
+        container.addView(title, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+        attachPathField = EditText(this).apply {
+            setText(savedAttachPath ?: DEFAULT_ATTACH_PATH)
+            isSingleLine = true
+            hint = getString(R.string.install_attach_path_label)
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                override fun afterTextChanged(s: Editable?) { revalidate() }
+            })
+        }
+        container.addView(attachPathField, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        val note = TextView(this).apply {
+            text = getString(R.string.install_attach_note)
+            textSize = 12f
+            alpha = 0.8f
+        }
+        container.addView(
+            note,
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = pad / 4 },
+        )
+        attachPathRow = container
+        return container
+    }
+
+    /** Show/hide the "new install" sections vs the attach path row. */
+    private fun updateAttachRows() {
+        distroPickerView?.visibility = if (attachMode) View.GONE else View.VISIBLE
+        attachPathRow?.visibility = if (attachMode) View.VISIBLE else View.GONE
+        methodPickerView?.visibility = if (attachMode) View.GONE else View.VISIBLE
+        helpLinkView?.visibility = if (attachMode) View.GONE else View.VISIBLE
+        changeableLaterView?.visibility = if (attachMode) View.GONE else View.VISIBLE
+        cacheProxyRowView?.visibility = if (attachMode) View.GONE else View.VISIBLE
+        if (attachMode) {
+            // The dev-only flavor row and the binds row both derive their
+            // visibility from selection state below; pin them hidden while
+            // attaching.
+            bootstrapRow?.visibility = View.GONE
+            bindsRow?.visibility = View.GONE
+        } else {
+            updateBootstrapRow()
+            updateBindsRow()
+        }
     }
 
     /**
@@ -503,13 +612,16 @@ class InstallActivity : AppCompatActivity() {
         val rawLabel = labelField.text.toString().trim()
         val slug = if (rawLabel.isEmpty()) null else Installation.slugifyLabel(rawLabel)
         val collides = slug != null && store.installationDir(slug).exists()
-        resolvedId = slug?.takeUnless { collides }
+        val pathOk = !attachMode || attachPathOk()
+        resolvedId = slug?.takeUnless { collides }?.takeIf { pathOk }
 
         if (::locationLabel.isInitialized) {
             locationLabel.text = when {
+                attachMode && !pathOk -> getString(R.string.install_attach_path_invalid)
                 rawLabel.isEmpty() -> getString(R.string.install_label_empty)
                 slug == null -> getString(R.string.install_label_invalid)
                 collides -> getString(R.string.install_already_installed_at, store.installationDir(slug).absolutePath)
+                attachMode -> attachPathField.text.toString().trim()
                 else -> store.installationDir(slug).absolutePath
             }
             val colorAttr = if (resolvedId == null) {
@@ -522,8 +634,17 @@ class InstallActivity : AppCompatActivity() {
 
         if (::installButton.isInitialized) {
             installButton.isEnabled = (resolvedId != null)
-            installButton.text = getString(R.string.action_install)
+            installButton.text = getString(
+                if (attachMode) R.string.action_attach else R.string.action_install,
+            )
         }
+    }
+
+    /** Absolute, non-blank path for the "attach an existing rootfs" mode. */
+    private fun attachPathOk(): Boolean {
+        if (!::attachPathField.isInitialized) return false
+        val p = attachPathField.text.toString().trim()
+        return p.isNotEmpty() && p.startsWith("/")
     }
 
     /**
@@ -639,11 +760,11 @@ class InstallActivity : AppCompatActivity() {
     }
 
     private fun beginInstall() {
-        // Only the chroot path needs `su`. Proot/tawcroot are rootless
-        // by definition, so a missing-root device fails this check only
-        // if the user picked chroot anyway.
-        val methodKey = selectedMethod ?: EnabledMethods.keys.firstOrNull() ?: TawcrootMethod.KEY
-        if (methodKey == ChrootMethod.KEY && !Su.rootAvailable()) {
+        // Attach always runs via the root chroot method, so root is
+        // required there too; proot/tawcroot are rootless by definition,
+        // so a missing-root device fails this check only if the user
+        // picked chroot or attach mode.
+        if ((attachMode || selectedMethod == ChrootMethod.KEY) && !Su.rootAvailable()) {
             // We don't have a panel anymore; surface as a quick
             // toast-style status on the form. Service-level gate would
             // also refuse, but a fail-fast at the form level avoids the
@@ -655,6 +776,22 @@ class InstallActivity : AppCompatActivity() {
             ).show()
             return
         }
+
+        if (attachMode) {
+            val targetId = resolvedId ?: return  // button disabled when null
+            val path = attachPathField.text.toString().trim()
+            if (!path.startsWith("/")) return
+            val labelText = labelField.text.toString().trim().takeIf { it.isNotEmpty() }
+            InstallationService.startInstall(
+                this, targetId, ChrootMethod.KEY, null, labelText,
+                externalRootfsPath = path,
+            )
+            startActivity(LogScreenActivity.intentFor(this, "install:$targetId"))
+            finish()
+            return
+        }
+
+        val methodKey = selectedMethod ?: EnabledMethods.keys.firstOrNull() ?: TawcrootMethod.KEY
         val targetId = resolvedId ?: return  // button disabled when null
 
         val distroKey = selectedDistro
@@ -714,5 +851,9 @@ class InstallActivity : AppCompatActivity() {
         private const val KEY_BINDS = "tawc.install.externalBinds"
         private const val KEY_ANDO = "tawc.install.ando"
         private const val KEY_BOOTSTRAP = "tawc.install.bootstrap"
+        private const val KEY_ATTACH_MODE = "tawc.install.attachMode"
+        private const val KEY_ATTACH_PATH = "tawc.install.attachPath"
+        /** Suggested default for the attach path field. */
+        private const val DEFAULT_ATTACH_PATH = "/data/local/debian"
     }
 }

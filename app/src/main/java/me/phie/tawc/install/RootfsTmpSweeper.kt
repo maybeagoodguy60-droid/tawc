@@ -63,7 +63,10 @@ object RootfsTmpSweeper {
             // delete target from an unvalidated id (metadata could be
             // corrupt).
             if (!Installation.isValidId(inst.id)) continue
-            val tmp = File(store.rootfsDir(inst.id), "tmp")
+            // Never sweep an externally attached rootfs — the tree is
+            // user-owned; linux X doesn't manage its /tmp.
+            if (inst.externalRootfsPath != null) continue
+            val tmp = File(inst.rootfsDir(store), "tmp")
             if (!tmp.isDirectory) continue
             val stats = sweep(tmp, cutoff)
             deleted += stats.deleted

@@ -99,17 +99,19 @@ val xwaylandPackageAbis: List<String> =
 val xwaylandPackaged: Boolean = xwaylandPackageAbis.isNotEmpty()
 
 android {
-    namespace = "me.phie.tawc"
+    namespace = "com.graydev.linuxx"
     compileSdk = 36
     ndkVersion = "27.2.12479018"
 
     defaultConfig {
-        applicationId = "me.phie.tawc"
+        applicationId = "com.graydev.linuxx"
         minSdk = 29
         targetSdk = 36
-        // Plain release counter, single source of truth; see notes/release.md.
-        versionName = "1"
-        versionCode = versionName!!.toInt()
+        // linux X v0.1-beta. versionName is informational for the launcher
+        // /About; versionCode is the monotonic release counter, starting
+        // at 1 for this new package.
+        versionName = "0.1-beta"
+        versionCode = 1
         ndk {
             abiFilters.addAll(tawcAbis)
         }

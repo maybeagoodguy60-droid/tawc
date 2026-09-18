@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import me.phie.tawc.R
+import me.phie.tawc.AndoBrokers
 import me.phie.tawc.install.distro.BootstrapFlavor
 import me.phie.tawc.install.distro.Distro
 import me.phie.tawc.install.distro.DistroRegistry
@@ -205,6 +206,7 @@ class InstallationService : Service() {
                 intent.getStringExtra(EXTRA_EXTERNAL_BINDS),
                 intent.getBooleanExtra(EXTRA_ANDO, false),
                 intent.getStringExtra(EXTRA_BOOTSTRAP),
+                intent.getStringExtra(EXTRA_EXTERNAL_ROOTFS),
             )
             ACTION_UNINSTALL -> startUninstall(rawId)
             else -> {
@@ -254,6 +256,7 @@ class InstallationService : Service() {
         externalBindsJson: String? = null,
         andoEnabled: Boolean = false,
         bootstrapFlavorId: String? = null,
+        externalRootfsPath: String? = null,
     ) {
         if (!Installation.isValidId(id)) {
             rejectInstall(id, getString(R.string.install_reject_invalid_id))
@@ -280,6 +283,15 @@ class InstallationService : Service() {
                 rejectInstall(id, getString(R.string.install_reject_id_state, stateLabel(s)))
                 return
             }
+        }
+        // Attach an existing rootfs? The whole download/configure
+        // pipeline is skipped: the tree is user-owned, already installed
+        // (the user runs it via chroot today), so we only validate it is
+        // root-reachable + chrootable-looking and record READY metadata.
+        // Entry is always the root chroot method; enabled in release.
+        if (externalRootfsPath != null) {
+            attachExternalRootfs(id, externalRootfsPath, label)
+            return
         }
         // Resolve the requested distro (or fall back to the host
         // default) before any disk state is written so an unsupported
@@ -427,7 +439,7 @@ class InstallationService : Service() {
             appendLog("[install] external binds: " +
                 externalBinds.joinToString { "${it.guestPath} <- ${it.hostPath}" })
         }
-        val rootfsPath = store.rootfsDir(id).absolutePath
+        val rootfsPath = store.load(id)?.rootfsDir(store)?.absolutePath ?: store.rootfsDir(id).absolutePath
         val op = MutableOperation(
             id = "install:$id",
             title = getString(R.string.operation_title_install, id),
@@ -475,6 +487,101 @@ class InstallationService : Service() {
                 if (pendingFollowupUninstallId != id) {
                     stopForeground(STOP_FOREGROUND_REMOVE)
                 }
+                clearCurrentJob(id)
+            }
+        }
+        currentJob = JobState(job, id, JobKind.INSTALL, op)
+    }
+
+    /**
+     * Attach an existing rootfs at [path] as slot [id] — the linux X
+     * "use existing rootfs" feature. The tree is user-owned and lives
+     * OUTSIDE app storage (e.g. `/data/local/debian`), so:
+     *
+     *  - validation only checks it is absolute, root-reachable (`su`)
+     *    and looks chrootable (`<path>/usr` exists and is readable);
+     *  - the recorded installation is a READY external attach
+     *    ([Installation.externalRootfsPath]) with no [Installer]
+     *    pipeline, no `configure()` and no [TawcInstaller] providers;
+     *  - uninstall (see [RootfsCleaner]) kills guests then deletes ONLY
+     *    the slot dir — the user-owned tree is never touched.
+     *
+     * Always entry-method `chroot` (needs root); validated + persisted
+     * off the main thread so the `su` probe can't ANR.
+     */
+    private fun attachExternalRootfs(id: String, path: String, label: String?) {
+        val store = InstallationStore(applicationContext)
+        if (!path.startsWith("/")) {
+            rejectInstall(id, getString(R.string.install_reject_external_not_absolute, path))
+            return
+        }
+        val abs = runCatching { java.io.File(path).canonicalPath }.getOrDefault(path)
+        if (store.list().any { it.externalRootfsPath?.let(::java.io.File)?.absolutePath == abs }) {
+            rejectInstall(id, getString(R.string.install_reject_external_already_attached, abs))
+            return
+        }
+        if (InstallationMethod.forKey(applicationContext, ChrootMethod.KEY) == null) {
+            rejectInstall(id, getString(R.string.install_reject_external_no_chroot))
+            return
+        }
+        val op = MutableOperation(
+            id = "install:$id",
+            title = getString(R.string.operation_title_install, id),
+            log = _log,
+            // Attach is near-instant with nothing intermediate to roll
+            // back; a cancel tap simply lets the probe finish/fail.
+            cancelConfirmation = null,
+            cancelHandler = { /* no-op — nothing to interrupt */ },
+        )
+        OperationsRegistry.register(op)
+        val (notifId, notif) = OperationsNotificationCenter.fgsAnchorFor(op.id)
+        startDataSyncForeground(notifId, notif)
+        val job = scope.launch {
+            try {
+                runInterruptible(Dispatchers.IO) {
+                    if (!Su.rootAvailable()) {
+                        throw IOException(getString(R.string.install_reject_external_requires_root))
+                    }
+                    // ChrootMounter refuses a rootfs without /usr; catch
+                    // a typo'd path before recording anything.
+                    val quote = "'" + abs.replace("'", "'\\''") + "'"
+                    val probe = Su.run("test -d $quote/usr && test -r $quote/usr", timeoutSeconds = 15)
+                    if (!probe.ok) {
+                        throw IOException(getString(R.string.install_reject_external_bad_rootfs, abs))
+                    }
+                    val now = System.currentTimeMillis()
+                    val inst = Installation(
+                        id = id,
+                        distro = Installation.DISTRO_EXTERNAL,
+                        arch = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a",
+                        method = ChrootMethod.KEY,
+                        installedAtMillis = now,
+                        sourceUrl = "",
+                        state = Installation.State.READY,
+                        schemaVersion = Installation.CURRENT_SCHEMA_VERSION,
+                        installedAtAppVersionCode = me.phie.tawc.BuildConfig.VERSION_CODE.toLong(),
+                        label = label,
+                        externalRootfsPath = abs,
+                    )
+                    store.save(inst)
+                    AndoBrokers.refresh(applicationContext)
+                    appendLog("[install] attached external rootfs: $abs -> $id (${ChrootMethod.KEY}, root)")
+                    publishProgress(InstallProgress(
+                        InstallStage.DONE,
+                        getString(R.string.install_progress_attached, label ?: id),
+                    ))
+                }
+            } catch (t: Throwable) {
+                if (t is kotlinx.coroutines.CancellationException) throw t
+                Log.e(TAG, "external attach failed", t)
+                appendLog("FAILED: ${t.message}")
+                publishProgress(InstallProgress(
+                    InstallStage.FAILED,
+                    getString(R.string.operation_status_install_failed, firstLine(t.message)),
+                    errorMessage = t.message,
+                ))
+            } finally {
+                stopForeground(STOP_FOREGROUND_REMOVE)
                 clearCurrentJob(id)
             }
         }
@@ -777,9 +884,10 @@ class InstallationService : Service() {
      */
     private fun runCancelKillScript(id: String) {
         val store = InstallationStore(applicationContext)
+        val inst = store.load(id)
         val installDir = store.installationDir(id)
-        val rootfsPath = store.rootfsDir(id).absolutePath
-        val includeChroot = store.load(id)?.method == ChrootMethod.KEY
+        val rootfsPath = inst?.rootfsDir(store)?.absolutePath ?: store.rootfsDir(id).absolutePath
+        val includeChroot = inst?.method == ChrootMethod.KEY
         try {
             ProcessScanner.killAllInRootfs(
                 rootfsPath = rootfsPath,
@@ -926,8 +1034,8 @@ class InstallationService : Service() {
     companion object {
         private const val TAG = "tawc-install"
 
-        const val ACTION_INSTALL = "me.phie.tawc.install.SERVICE_INSTALL"
-        const val ACTION_UNINSTALL = "me.phie.tawc.install.SERVICE_UNINSTALL"
+        const val ACTION_INSTALL = "com.graydev.linuxx.install.SERVICE_INSTALL"
+        const val ACTION_UNINSTALL = "com.graydev.linuxx.install.SERVICE_UNINSTALL"
         const val EXTRA_ID = "id"
         const val EXTRA_METHOD = "method"
         const val EXTRA_DISTRO = "distro"
@@ -941,6 +1049,11 @@ class InstallationService : Service() {
          *  distro's supported flavor. Non-supported flavors are
          *  debug-only, enforced in [startInstall]. */
         const val EXTRA_BOOTSTRAP = "bootstrap"
+        /** Absolute host path of an *external* rootfs to attach (the
+         *  "use existing rootfs" feature). When present, [startInstall]
+         *  skips the whole download/configure pipeline and records a
+         *  READY installation pointing at the user-owned tree. */
+        const val EXTRA_EXTERNAL_ROOTFS = "externalRootfsPath"
 
         fun startInstall(
             context: Context,
@@ -952,6 +1065,7 @@ class InstallationService : Service() {
             externalBindsJson: String? = null,
             andoEnabled: Boolean = false,
             bootstrapFlavorId: String? = null,
+            externalRootfsPath: String? = null,
         ) {
             val i = Intent(context, InstallationService::class.java)
                 .setAction(ACTION_INSTALL)
@@ -963,6 +1077,7 @@ class InstallationService : Service() {
             if (externalBindsJson != null) i.putExtra(EXTRA_EXTERNAL_BINDS, externalBindsJson)
             if (andoEnabled) i.putExtra(EXTRA_ANDO, true)
             if (bootstrapFlavorId != null) i.putExtra(EXTRA_BOOTSTRAP, bootstrapFlavorId)
+            if (externalRootfsPath != null) i.putExtra(EXTRA_EXTERNAL_ROOTFS, externalRootfsPath)
             context.startForegroundService(i)
         }
 

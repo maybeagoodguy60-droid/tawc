@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name" translatable="false">TAWC</string>
+    <string name="app_name" translatable="false">linux X</string>
 
     <string name="title_install">Install</string>
     <string name="title_install_distro">Install distro</string>
@@ -19,6 +19,11 @@
     <string name="action_cancel">Cancel</string>
     <string name="action_delete">Delete</string>
     <string name="action_install">Install</string>
+    <string name="action_attach">Attach</string>
+    <string name="install_attach_toggle">Use an existing rootfs (needs root)</string>
+    <string name="install_attach_path_label">Rootfs path</string>
+    <string name="install_attach_note">linux X will run this tree via chroot (su). Nothing is installed into it, and uninstalling only detaches — the tree is never deleted.</string>
+    <string name="install_attach_path_invalid">must be an absolute path, e.g. /data/local/debian</string>
     <string name="action_install_new_distro">Install new distro</string>
     <string name="action_manage">Manage</string>
     <string name="action_terminal">Terminal</string>
@@ -99,7 +104,7 @@
     <string name="install_method_chroot_requires_root">chroot (requires root)</string>
     <string name="install_root_unavailable">root (su) not available &#8212; pick proot or tawcroot, or grant Magisk root.</string>
     <string name="install_method_info_tawcroot_title">tawcroot (recommended)</string>
-    <string name="install_method_info_tawcroot_body">Custom systrap-based syscall emulator written for TAWC. Like proot it needs no root, but uses a more efficient ptrace alternative and is built specifically to handle the Wayland / GPU paths the compositor needs. Default for new installs and the only officially supported method.</string>
+    <string name="install_method_info_tawcroot_body">Custom systrap-based syscall emulator written for linux X. Like proot it needs no root, but uses a more efficient ptrace alternative and is built specifically to handle the Wayland / GPU paths the compositor needs. Default for new installs and the only officially supported method.</string>
     <string name="install_method_info_proot_title">proot (dev only)</string>
     <string name="install_method_info_proot_body">Userspace chroot via the Termux fork of proot. Rootless and broadly compatible &#8212; pacman, package builds and most desktop apps work. Slower than tawcroot because every syscall is intercepted via ptrace. Available in debug builds for comparison; not shipped to release users.</string>
     <string name="install_method_info_chroot_title">chroot (requires root, dev only)</string>
@@ -133,6 +138,7 @@
     <string name="copied_to_clipboard">Copied to clipboard</string>
     <string name="distro_info_delete_title">Delete %1$s?</string>
     <string name="distro_info_delete_message">This permanently deletes the rootfs at\n%1$s,\nincluding all files in your Linux home directory.</string>
+    <string name="distro_info_detach_message">Uninstalling detaches the lab from this rootfs at\n%1$s.\nThe rootfs itself is never deleted.</string>
 
     <string name="launcher_loading_apps">Loading apps&#8230;</string>
     <string name="launcher_installation_not_found">Installation \'%1$s\' not found.</string>
@@ -204,6 +210,12 @@
     <string name="install_reject_bootstrap_method">bootstrap flavor \'%1$s\' requires the tawcroot method (got \'%2$s\')</string>
     <string name="install_reject_bad_external_binds">invalid externalBinds: %1$s</string>
     <string name="install_reject_external_binds_method">external binds require the tawcroot method (got \'%1$s\')</string>
+    <string name="install_reject_external_not_absolute">rootfs path must be absolute: %1$s</string>
+    <string name="install_reject_external_already_attached">already attached: %1$s</string>
+    <string name="install_reject_external_no_chroot">the chroot method is not shipped in this build</string>
+    <string name="install_reject_external_requires_root">attaching an existing rootfs needs root (su), and none is available on this device</string>
+    <string name="install_reject_external_bad_rootfs">not a usable Linux rootfs (missing readable /usr dir at %1$s)</string>
+    <string name="install_progress_attached">Attached %1$s</string>
     <string name="install_cancel_title">Cancel install of \'%1$s\'?</string>
     <string name="install_cancel_message">Cancelling will stop the install and remove the partially extracted rootfs at\n%1$s.\nNothing of yours has been written there yet, so no data will be lost.</string>
     <string name="install_cancel_confirm">Cancel install</string>

@@ -51,8 +51,15 @@ class InstallationStore(context: Context) {
      * [TawcrootMethod.externalBindsFor] uses).
      */
     fun idForRootfs(rootfs: String): String? {
+        val path = File(rootfs).absolutePath
+        // Externally attached rootfs (linux X attach feature): the tree
+        // lives outside <baseDir>, so match the recorded path directly
+        // rather than the <distros>/<id>/rootfs layout.
+        list().firstOrNull { it.externalRootfsPath?.let(::File)?.absolutePath == path }?.id?.let {
+            return it
+        }
         val id = File(rootfs).absoluteFile.parentFile?.name ?: return null
-        return if (rootfsDir(id).absolutePath == File(rootfs).absolutePath) id else null
+        return if (rootfsDir(id).absolutePath == path) id else null
     }
 
     /**
@@ -205,9 +212,12 @@ class InstallationStore(context: Context) {
      * Blocks on the shell; call from a background dispatcher.
      */
     fun computeSizeBytes(id: String): Long {
-        val dir = installationDir(id)
+        val inst = load(id)
+        // Attached external rootfs: measure the external tree (the slot
+        // dir itself only holds metadata.json).
+        val dir = inst?.externalRootfsPath?.let(::File) ?: installationDir(id)
         if (!dir.exists()) return 0L
-        val needsRoot = load(id)?.method == Installation.METHOD_CHROOT
+        val needsRoot = inst?.method == Installation.METHOD_CHROOT
         val cmd = "du -sk '${dir.absolutePath}' 2>/dev/null | awk '{print \$1}'"
         val output: String = if (needsRoot) {
             // ProcessBuilder("su").start() throws IOException with

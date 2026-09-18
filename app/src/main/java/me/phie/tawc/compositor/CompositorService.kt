@@ -456,7 +456,7 @@ class CompositorService : Service() {
         private const val TAG = "tawc"
         private const val NOTIFICATION_ID = 1
         private const val CHANNEL_ID = "tawc_compositor"
-        private const val ACTION_EXIT = "me.phie.tawc.compositor.EXIT"
+        private const val ACTION_EXIT = "com.graydev.linuxx.compositor.EXIT"
 
         fun ensureRunning(context: Context) {
             context.applicationContext.startForegroundService(

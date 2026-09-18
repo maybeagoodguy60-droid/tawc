@@ -70,6 +70,7 @@ class TerminalActivity : AppCompatActivity(), TerminalViewClient, TerminalSessio
     private lateinit var method: TawcrootMethod
     private var activeSession: TerminalSession? = null
     private var distroId: String = ""
+    private var rootfsPath: String = ""
     private var fontSizePx: Int = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -92,6 +93,9 @@ class TerminalActivity : AppCompatActivity(), TerminalViewClient, TerminalSessio
             return
         }
         method = tawcroot
+        // Effective rootfs — for attached external installs this is the
+        // user-owned path, well outside <baseDir>/<id>/rootfs.
+        rootfsPath = installation.rootfsDir(store).absolutePath
         // No toolbar shows it, but the recents card and accessibility
         // still name the screen by the activity title.
         title = DistroRegistry.displayLabel(installation)
@@ -280,7 +284,7 @@ class TerminalActivity : AppCompatActivity(), TerminalViewClient, TerminalSessio
     private fun spawnSession(command: String? = null, label: String? = null): TerminalSession? {
         val exec = try {
             method.ptyShellExec(
-                store.rootfsDir(distroId).absolutePath,
+                rootfsPath,
                 command = command?.let { "$it$HOLD_OPEN_TRAILER" },
             )
         } catch (e: IOException) {

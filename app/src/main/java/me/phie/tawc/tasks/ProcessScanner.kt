@@ -51,7 +51,7 @@ object ProcessScanner {
     fun scan(context: Context, installs: List<Installation>): ScanResult {
         val store = InstallationStore(context)
         val pairs: List<Pair<String, String>> = installs.map { inst ->
-            canonicalize(store.rootfsDir(inst.id).absolutePath) to inst.id
+            canonicalize(inst.rootfsDir(store).absolutePath) to inst.id
         }
         val knownIds = installs.map { it.id }.toSet()
         val orphan = AppUidProcfsScanner.OrphanPattern(
@@ -68,7 +68,7 @@ object ProcessScanner {
         val chrootInstalls = installs.filter { it.method == ChrootMethod.KEY }
         val suProcs = if (chrootInstalls.isNotEmpty()) {
             val chrootPairs = chrootInstalls.map {
-                canonicalize(store.rootfsDir(it.id).absolutePath) to it.id
+                canonicalize(it.rootfsDir(store).absolutePath) to it.id
             }
             SuProcfsScanner.scan(chrootPairs)
         } else {

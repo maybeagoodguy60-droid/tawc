@@ -36,7 +36,7 @@ class CancelOperationReceiver : BroadcastReceiver() {
 
     companion object {
         private const val TAG = "tawc-ops"
-        const val ACTION = "me.phie.tawc.ops.CANCEL_OPERATION"
+        const val ACTION = "com.graydev.linuxx.ops.CANCEL_OPERATION"
         const val EXTRA_OPERATION_ID = "operationId"
     }
 }

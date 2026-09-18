@@ -82,11 +82,18 @@ object RootfsCleaner {
         }
         val installDir = store.installationDir(id)
         if (!installDir.exists()) return
-        val rootfsPath = File(installDir, "rootfs").absolutePath
+        val inst = store.load(id)
+        // Externally attached rootfs (linux X "use existing rootfs"
+        // feature): the tree is user-owned and lives OUTSIDE <baseDir>.
+        // Detach never touches it — pass-1 (rootfs deletion) and the
+        // chroot unmount are both skipped below; only the <distros>/<id>
+        // slot dir (metadata) goes away.
+        val external = inst?.externalRootfsPath
+        val rootfsPath = external ?: File(installDir, "rootfs").absolutePath
         val installPath = installDir.absolutePath
         // Both facts are chroot-only today; a future method that
         // mounts or runs guests as root must be added here.
-        val chroot = store.load(id)?.method == ChrootMethod.KEY
+        val chroot = inst?.method == ChrootMethod.KEY
 
         log("kill: guest processes (root=$rootfsPath)")
         try {
@@ -103,7 +110,7 @@ object RootfsCleaner {
             log("kill: warning, ${t.javaClass.simpleName}: ${t.message}")
         }
 
-        if (chroot) {
+        if (chroot && external == null) {
             log("unmount: $rootfsPath")
             val ur = ChrootMounter.unmount(rootfsPath)
             if (!ur.ok) {
@@ -128,8 +135,9 @@ object RootfsCleaner {
         // prints every deleted path on stdout — thousands of lines on
         // a cancel path; stderr (real errors) still reaches the
         // captured output shown on failure. No per-line `onLine` for
-        // the same reason.
-        if (File(rootfsPath).exists()) {
+        // the same reason. Skipped for externally attached slots — the
+        // user-owned tree survives detach.
+        if (external == null && File(rootfsPath).exists()) {
             log("rm: rootfs subtree at $rootfsPath")
             deletePass(
                 script = "find ${Sh.quote(rootfsPath)} -xdev -depth -delete >/dev/null",

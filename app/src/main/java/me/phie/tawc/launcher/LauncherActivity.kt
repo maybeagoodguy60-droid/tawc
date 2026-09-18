@@ -248,7 +248,7 @@ class LauncherActivity : AppCompatActivity() {
             emptyView.text = getString(R.string.launcher_installation_state_wait, inst.state.name.lowercase())
             return
         }
-        val rootfs = store.rootfsDir(inst.id).absolutePath
+        val rootfs = inst.rootfsDir(store).absolutePath
         uiScope.launch {
             allEntries = withContext(Dispatchers.IO) { LauncherEntry.scan(rootfs) }
             applyFilter()
@@ -365,7 +365,7 @@ class LauncherActivity : AppCompatActivity() {
             EntryAction(getString(R.string.launcher_action_edit)) { openEditor(entry.path) }
                 .takeIf {
                     canEditEntries() &&
-                        DesktopEntryFile.isManaged(entry.path, store.rootfsDir(installationId))
+                        DesktopEntryFile.isManaged(entry.path, store.load(installationId)?.rootfsDir(store) ?: store.rootfsDir(installationId))
                 },
         )
     }

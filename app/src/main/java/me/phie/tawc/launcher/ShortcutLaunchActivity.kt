@@ -45,7 +45,7 @@ class ShortcutLaunchActivity : AppCompatActivity() {
             fail(label, getString(R.string.shortcut_install_not_ready, inst.state.name.lowercase()))
             return
         }
-        val rootfs = store.rootfsDir(inst.id).absolutePath
+        val rootfs = inst.rootfsDir(store).absolutePath
         lifecycleScope.launch {
             val entry = withContext(Dispatchers.IO) {
                 LauncherEntry.scan(rootfs).firstOrNull { it.id == desktopId }

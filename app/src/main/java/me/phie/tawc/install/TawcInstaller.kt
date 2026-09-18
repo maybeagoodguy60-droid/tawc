@@ -102,6 +102,13 @@ internal object TawcInstaller {
             log("tawc-installer: $id metadata is corrupt — skipping")
             return
         }
+        if (installation.externalRootfsPath != null) {
+            // Externally attached rootfs (linux X "use existing rootfs"):
+            // the tree is user-owned, so nothing app-side (libhybris,
+            // bridge, linker config, …) is ever installed into it.
+            log("tawc-installer: $id is an external attach (${installation.externalRootfsPath}) — skipping")
+            return
+        }
         val rootfs = store.rootfsDir(id)
         if (!rootfs.isDirectory) {
             log("tawc-installer: $id rootfs missing at $rootfs — skipping")

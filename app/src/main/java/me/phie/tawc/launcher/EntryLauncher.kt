@@ -89,7 +89,7 @@ object EntryLauncher {
             }
             Log.w(TAG, "terminal entry ${entry.id}: native terminal is tawcroot-only, running headless")
         }
-        val rootfs = InstallationStore(appContext).rootfsDir(inst.id).absolutePath
+        val rootfs = inst.rootfsDir(InstallationStore(appContext)).absolutePath
         val cmd = "${entry.exec} </dev/null >/dev/null 2>&1"
         LAUNCH_SCOPE.launch {
             runCatching { UserRootfsSession.runInside(appContext, method, rootfs, cmd) }

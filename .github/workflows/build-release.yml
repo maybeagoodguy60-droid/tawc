@@ -1,7 +1,8 @@
 name: Build signed release APK
 
-# Production release build using the repo's own scripts/build-release-apk.sh
-# (stock; no source changes). Signs with the keystore held in repo secrets.
+# Production release build using the repo's own scripts/build-release-apk.sh.
+# Ships methods tawcroot,chroot (chroot enables the external-rootfs attach
+# feature). Signs with the keystore held in repo secrets.
 
 on:
   workflow_dispatch:
@@ -34,7 +35,7 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: "Install host packages (release set: libhybris,cpu + tawcroot)"
+      - name: "Install host packages (release set: libhybris,cpu + tawcroot,chroot)"
         run: |
           sudo apt-get update
           sudo apt-get install -y \
