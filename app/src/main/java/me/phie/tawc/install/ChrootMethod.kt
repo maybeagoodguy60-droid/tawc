@@ -4,6 +4,7 @@ import android.content.Context
 import me.phie.tawc.GraphicsBackend
 import me.phie.tawc.AppPaths
 import me.phie.tawc.Settings
+import me.phie.tawc.compositor.CompositorService
 import java.io.File
 
 /**
@@ -49,7 +50,17 @@ class ChrootMethod(context: Context) : InstallationMethod {
      * own session.
      */
     override fun startInside(rootfs: String, command: String?, graphics: GraphicsBackend?): Process {
-        LinkerConfig.install(rootfs)
+        // Externally-attached rootfs (linux X attach feature): the tree
+        // lives outside app data (e.g. /data/local/debian) and was never
+        // provisioned by TawcInstaller. Detect it here so the per-spawn
+        // script (a) skips writing the linker config into the user-owned
+        // tree and (b) bind-supplies libhybris read-only instead of
+        // relying on in-tree copies. Same asset-bind shape tawcroot uses.
+        val external = store.idForRootfs(rootfs)?.let { store.load(it)?.externalRootfsPath != null } == true
+        val hybrisSrc = File(context.filesDir, "libhybris").absolutePath
+        if (!external) {
+            LinkerConfig.install(rootfs)
+        }
         // Magisk's su inherits the calling process's mount namespace,
         // so we wrap with `unshare -m` so any leaked binds go away when
         // the script exits. (See [Su.run]'s docstring for context.)
@@ -61,6 +72,24 @@ class ChrootMethod(context: Context) : InstallationMethod {
         val script = buildString {
             appendLine("set -eu")
             appendLine(ChrootMounter.mountScript(rootfs, appPaths.shareDir.absolutePath, andoHostDir))
+            if (external && CompositorService.ensureLibhybrisExtracted(context)) {
+                val hybrisSrcQ = Sh.quote(hybrisSrc)
+                val guestHybris = "$rootfs/usr/lib/hybris"
+                val guestHybrisQ = Sh.quote(guestHybris)
+                appendLine(
+                    """
+                    # Attached rootfs has no in-tree libhybris (install
+                    # pipeline was skipped); supply it read-only from app
+                    # assets so guest GUI apps get hardware GL without
+                    # writing anything into the user-owned tree.
+                    mkdir -p $guestHybrisQ
+                    is_mounted $guestHybrisQ || {
+                        mount -o bind,rslave $hybrisSrcQ $guestHybrisQ
+                        mount -o remount,ro,bind $guestHybrisQ
+                    }
+                    """.trimIndent()
+                )
+            }
             // Quote rootfs and (if present) the user command into the
             // script. Both go through Sh.quote so paths with quotes
             // can't break out. The in-rootfs bash starts under
