@@ -41,6 +41,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          trap 'echo "Extraction failed at line $LINENO: $BASH_COMMAND" >&2' ERR
           apk="$RUNNER_TEMP/$APK_NAME"
           apkdir="$RUNNER_TEMP/apk"
           source_dir="$RUNNER_TEMP/tawc-source"
