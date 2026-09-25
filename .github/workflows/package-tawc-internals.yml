@@ -93,7 +93,7 @@ jobs:
           fi
           unzip -p "$apk" assets/licenses.json > "$bundle/Hybris/TAWC-licenses.json"
           unzip -p "$apk" assets/licenses.json > "$bundle/wayland/TAWC-licenses.json"
-          tar --exclude=.git -C "$source_dir" -cf - . | tar -C "$bundle/wayland/source/tawc" -xf -
+          tar --exclude='./.git' --exclude='./.git/*' -C "$source_dir" -cf - . | tar -C "$bundle/wayland/source/tawc" -xf -
 
       - name: Add installation scripts and environment profiles
         run: |
