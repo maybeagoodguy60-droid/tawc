@@ -95,7 +95,7 @@ jobs:
           fi
           unzip -p "$apk" assets/licenses.json > "$bundle/Hybris/TAWC-licenses.json"
           unzip -p "$apk" assets/licenses.json > "$bundle/wayland/TAWC-licenses.json"
-          gh api "repos/${UPSTREAM_REPO}/zipball/${SOURCE_COMMIT}" > "$RUNNER_TEMP/tawc-source.zip"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/tawc-source.zip" "https://github.com/${UPSTREAM_REPO}/archive/${SOURCE_COMMIT}.zip"
           rm -rf "$bundle/wayland/source/tawc"
           mkdir -p "$bundle/wayland/source"
           unzip -q "$RUNNER_TEMP/tawc-source.zip" -d "$bundle/wayland/source"
