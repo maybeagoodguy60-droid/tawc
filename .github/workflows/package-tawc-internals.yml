@@ -1,0 +1,402 @@
+name: Package upstream TAWC GPU and Wayland internals
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_REPO: wmww/tawc
+  RELEASE_TAG: v3
+  SOURCE_COMMIT: 0b356e00e230dea42d6601b4f233f00e83b41272
+  APK_NAME: tawc-v3.apk
+  APK_SHA256: 7051e969dcc736f2bf2c05f6e0a228c89c09881a547b536bb9b2594a3d029aef
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download original TAWC release with gh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release"
+          release_size="$(gh api "repos/${UPSTREAM_REPO}/releases/tags/${RELEASE_TAG}" --jq ".assets[] | select(.name == \"${APK_NAME}\") | .size")"
+          test "$release_size" -gt 20000000
+          gh release download "$RELEASE_TAG" --repo "$UPSTREAM_REPO" --pattern "$APK_NAME" --dir "$RUNNER_TEMP/release"
+          mv "$RUNNER_TEMP/release/${APK_NAME}" "$RUNNER_TEMP/${APK_NAME}"
+          echo "$APK_SHA256  $RUNNER_TEMP/$APK_NAME" | sha256sum -c -
+
+      - name: Clone and verify original TAWC source
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$RELEASE_TAG" "https://github.com/${UPSTREAM_REPO}.git" "$RUNNER_TEMP/tawc-source"
+          test "$(git -C "$RUNNER_TEMP/tawc-source" rev-parse HEAD)" = "$SOURCE_COMMIT"
+
+      - name: Extract APK and create bundle
+        run: |
+          set -euo pipefail
+          apk="$RUNNER_TEMP/$APK_NAME"
+          apkdir="$RUNNER_TEMP/apk"
+          source_dir="$RUNNER_TEMP/tawc-source"
+          bundle="$RUNNER_TEMP/bundle"
+          mkdir -p "$apkdir" "$bundle/Hybris/gpu/libhybris" "$bundle/Hybris/gpu/mesa-zink" "$bundle/Hybris/gpu/gfxstream" "$bundle/Hybris/gpu/hybris-vulkan-only" "$bundle/Hybris/gpu/share/glvnd/egl_vendor.d" "$bundle/wayland/compositor/lib/android" "$bundle/wayland/compositor/lib/xwayland" "$bundle/wayland/compositor/bin" "$bundle/wayland/compositor/share" "$bundle/wayland/source/tawc"
+          unzip -q "$apk" -d "$apkdir"
+          test -f "$apkdir/assets/libhybris/arm64-v8a.tar"
+          test -f "$apkdir/assets/mesa-gfxstream/arm64-v8a/libvulkan_gfxstream.so"
+          test -f "$apkdir/assets/mesa-zink/arm64-v8a/mesa-zink.tar"
+          test -f "$apkdir/assets/xwayland/share.tar"
+          test -f "$apkdir/lib/arm64-v8a/libcompositor.so"
+          test -f "$apkdir/lib/arm64-v8a/libxwayland.so"
+          test -f "$apkdir/lib/arm64-v8a/libxkbcomp.so"
+          tar -xf "$apkdir/assets/libhybris/arm64-v8a.tar" -C "$bundle/Hybris/gpu/libhybris"
+          tar -xf "$apkdir/assets/mesa-zink/arm64-v8a/mesa-zink.tar" -C "$bundle/Hybris/gpu/mesa-zink"
+          cp -a "$apkdir/assets/mesa-gfxstream/arm64-v8a/libvulkan_gfxstream.so" "$bundle/Hybris/gpu/gfxstream/"
+          cp -a "$apkdir/assets/mesa-gfxstream/arm64-v8a/gfxstream_vk_icd.json" "$bundle/Hybris/gpu/gfxstream/"
+          ln -s ../libhybris/libvulkan.so.1 "$bundle/Hybris/gpu/hybris-vulkan-only/libvulkan.so.1"
+          cat > "$bundle/Hybris/gpu/share/glvnd/egl_vendor.d/50_mesa.json" <<'EOF'
+          {
+            "file_format_version": "1.0.0",
+            "ICD": {
+              "library_path": "../../../lib/mesa-zink/libEGL_mesa.so.0"
+            }
+          }
+          EOF
+          extract_member() {
+            unzip -p "$apk" "$1" > "$2"
+            test -s "$2"
+          }
+          for library in libcompositor.so libgfxstream_backend.so libc++_shared.so; do
+            extract_member "lib/arm64-v8a/$library" "$bundle/wayland/compositor/lib/android/$library"
+          done
+          for library in libX11-xcb.so libX11.so libXau.so libXfont2.so libdrm.so libffi.so libfontenc.so libfreetype.so libmd.so libpixman-1.so libwayland-client.so libwayland-cursor.so libwayland-egl.so libwayland-server.so libxcvt.so libxkbfile.so libxshmfence.so; do
+            extract_member "lib/arm64-v8a/$library" "$bundle/wayland/compositor/lib/xwayland/$library"
+          done
+          while IFS= read -r member; do
+            case "$member" in
+              lib/arm64-v8a/libxcb*.so)
+                extract_member "$member" "$bundle/wayland/compositor/lib/xwayland/${member##*/}"
+                ;;
+            esac
+          done < <(unzip -Z1 "$apk")
+          extract_member lib/arm64-v8a/libxwayland.so "$bundle/wayland/compositor/lib/xwayland/libxwayland.so"
+          extract_member lib/arm64-v8a/libxkbcomp.so "$bundle/wayland/compositor/lib/xwayland/libxkbcomp.so"
+          cp "$bundle/wayland/compositor/lib/xwayland/libxwayland.so" "$bundle/wayland/compositor/bin/Xwayland"
+          cp "$bundle/wayland/compositor/lib/xwayland/libxkbcomp.so" "$bundle/wayland/compositor/bin/xkbcomp"
+          chmod 0755 "$bundle/wayland/compositor/bin/Xwayland" "$bundle/wayland/compositor/bin/xkbcomp"
+          tar -xf "$apkdir/assets/xwayland/share.tar" -C "$bundle/wayland/compositor/share"
+          if [ -d "$apkdir/assets/xkb" ]; then
+            cp -a "$apkdir/assets/xkb" "$bundle/wayland/compositor/share/xkb-assets"
+          fi
+          unzip -p "$apk" assets/licenses.json > "$bundle/Hybris/TAWC-licenses.json"
+          unzip -p "$apk" assets/licenses.json > "$bundle/wayland/TAWC-licenses.json"
+          tar --exclude=.git -C "$source_dir" -cf - . | tar -C "$bundle/wayland/source/tawc" -xf -
+
+      - name: Add installation scripts and environment profiles
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/bundle"
+          cat > "$bundle/Hybris/gpu/install.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          root="${1:?Usage: install.sh ROOTFS}"
+          payload="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+          test -d "$root"
+          mkdir -p "$root/usr/lib/hybris" "$root/usr/lib/mesa-zink" "$root/usr/lib/gfxstream" "$root/usr/lib/hybris-vulkan-only" "$root/usr/share/glvnd/egl_vendor.d"
+          cp -a "$payload/libhybris/." "$root/usr/lib/hybris/"
+          cp -a "$payload/mesa-zink/." "$root/usr/lib/mesa-zink/"
+          cp -a "$payload/gfxstream/." "$root/usr/lib/gfxstream/"
+          cp -a "$payload/hybris-vulkan-only/." "$root/usr/lib/hybris-vulkan-only/"
+          cp -a "$payload/share/." "$root/usr/share/"
+          find "$root/usr/lib" -type f -name '*.so*' -exec chmod 0755 {} + 2>/dev/null || true
+          echo "Installed TAWC GPU payload into $root"
+          EOF
+          cat > "$bundle/Hybris/gpu/env-libhybris.sh" <<'EOF'
+          export LD_LIBRARY_PATH=/usr/lib/hybris/gl-shims:/usr/lib/hybris${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+          export HYBRIS_EGLPLATFORM=wayland
+          export HYBRIS_VULKANPLATFORM=wayland
+          export GDK_GL=gles:always
+          EOF
+          cat > "$bundle/Hybris/gpu/env-libhybris-zink.sh" <<'EOF'
+          export LD_LIBRARY_PATH=/usr/lib/mesa-zink:/usr/lib/hybris-vulkan-only:/usr/lib/hybris${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+          export MESA_LOADER_DRIVER_OVERRIDE=zink
+          export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+          export HYBRIS_VULKANPLATFORM=wayland
+          EOF
+          cat > "$bundle/Hybris/gpu/env-gfxstream.sh" <<'EOF'
+          export VK_ICD_FILENAMES=/usr/lib/gfxstream/gfxstream_vk_icd.json
+          export VIRTGPU_KUMQUAT=1
+          export VIRTGPU_KUMQUAT_GPU_SOCKET=/usr/share/tawc/kumquat-gpu-0
+          export MESA_LOADER_DRIVER_OVERRIDE=zink
+          export __GLX_VENDOR_LIBRARY_NAME=mesa
+          EOF
+          cat > "$bundle/wayland/compositor/install.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          prefix="${1:?Usage: install.sh PREFIX}"
+          payload="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+          test -d "$prefix"
+          mkdir -p "$prefix/lib/android" "$prefix/lib/xwayland" "$prefix/bin" "$prefix/share"
+          cp -a "$payload/lib/android/." "$prefix/lib/android/"
+          cp -a "$payload/lib/xwayland/." "$prefix/lib/xwayland/"
+          cp -a "$payload/bin/." "$prefix/bin/"
+          cp -a "$payload/share/." "$prefix/share/"
+          chmod 0755 "$prefix/bin/Xwayland" "$prefix/bin/xkbcomp"
+          echo "Installed TAWC Wayland payload into $prefix"
+          EOF
+          cat > "$bundle/wayland/compositor/env-xwayland.sh" <<'EOF'
+          export TAWC_WAYLAND_PREFIX="${TAWC_WAYLAND_PREFIX:?Set TAWC_WAYLAND_PREFIX}"
+          export LD_LIBRARY_PATH="$TAWC_WAYLAND_PREFIX/lib/xwayland:$TAWC_WAYLAND_PREFIX/lib/android${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export XKB_CONFIG_ROOT="$TAWC_WAYLAND_PREFIX/share/xkeyboard-config-2"
+          export DISPLAY=:0
+          EOF
+          cat > "$bundle/wayland/compositor/run-xwayland.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          prefix="${TAWC_WAYLAND_PREFIX:?Set TAWC_WAYLAND_PREFIX}"
+          source "$prefix/env-xwayland.sh"
+          cd "$prefix"
+          exec "$prefix/bin/Xwayland" "$@"
+          EOF
+          chmod 0755 "$bundle/Hybris/gpu/install.sh" "$bundle/wayland/compositor/install.sh" "$bundle/wayland/compositor/run-xwayland.sh"
+
+      - name: Add guides and provenance
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/bundle"
+          cat > "$bundle/Hybris/GPU-GUIDE.md" <<'EOF'
+          # TAWC GPU Guide
+
+          This payload contains the original upstream TAWC v3 GPU runtime for an arm64 Android-backed glibc chroot or proot rootfs.
+
+          ## Install
+
+          ```sh
+          ./Hybris/gpu/install.sh /path/to/rootfs
+          ```
+
+          The installer copies libhybris, Mesa Zink, gfxstream, Vulkan-only links, and EGL vendor configuration into the rootfs.
+
+          ## Default libhybris
+
+          ```sh
+          export LD_LIBRARY_PATH=/usr/lib/hybris/gl-shims:/usr/lib/hybris
+          export HYBRIS_EGLPLATFORM=wayland
+          export HYBRIS_VULKANPLATFORM=wayland
+          export GDK_GL=gles:always
+          ```
+
+          Libhybris loads the Android vendor EGL, GLES, and Vulkan drivers into a glibc process. The compositor and client then use the same Android driver and Android hardware buffers.
+
+          ## Zink
+
+          ```sh
+          export LD_LIBRARY_PATH=/usr/lib/mesa-zink:/usr/lib/hybris-vulkan-only:/usr/lib/hybris
+          export MESA_LOADER_DRIVER_OVERRIDE=zink
+          export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+          export HYBRIS_VULKANPLATFORM=wayland
+          ```
+
+          Zink requires a Vulkan driver with `VK_KHR_dynamic_rendering`, normally Vulkan 1.3 or newer. Older Android drivers commonly fail and must use libhybris GLES or the gfxstream path.
+
+          ## Gfxstream
+
+          ```sh
+          export VK_ICD_FILENAMES=/usr/lib/gfxstream/gfxstream_vk_icd.json
+          export VIRTGPU_KUMQUAT=1
+          export VIRTGPU_KUMQUAT_GPU_SOCKET=/usr/share/tawc/kumquat-gpu-0
+          export MESA_LOADER_DRIVER_OVERRIDE=zink
+          export __GLX_VENDOR_LIBRARY_NAME=mesa
+          ```
+
+          Gfxstream requires the Android compositor to provide the kumquat socket. The guest library alone is not a complete GPU host.
+
+          ## Required Android exposure
+
+          The launcher must expose the Android system/vendor runtime, `/system_ext`, `/dev`, `/dev/binderfs`, and the Android linker configuration. A normal desktop chroot does not provide these automatically.
+
+          ## Troubleshooting
+
+          | Error | Cause | Fix |
+          |---|---|---|
+          | `cannot open libEGL.so` | Payload missing or library path wrong | Run the installer and source `env-libhybris.sh` |
+          | `eglInitialize` fails | Wrong platform or missing Android mounts | Set `HYBRIS_EGLPLATFORM=wayland` and expose Android mounts |
+          | `llvmpipe` renderer | Zink failed | Check Vulkan version and dynamic-rendering support |
+          | No Vulkan device | Vendor Vulkan cannot load | Check `/vendor`, linker config, and bionic library access |
+          | Gfxstream connection failure | Kumquat socket unavailable | Start the Android compositor and expose its socket |
+          | AHB allocation failure | Binder/gralloc unavailable | Expose `/system_ext` and `/dev/binderfs` |
+          | Works in a shell but not in a launcher | Environment not forwarded | Export variables in the process launcher |
+
+          The payload does not contain DRM, kernel GPU drivers, or Termux:X11.
+          EOF
+          cat > "$bundle/wayland/WAYLAND-GUIDE.md" <<'EOF'
+          # TAWC Wayland Guide
+
+          This package contains the original upstream TAWC v3 Wayland runtime and complete source snapshot.
+
+          ## Contents
+
+          - `compositor/lib/android/libcompositor.so`
+          - `compositor/lib/android/libgfxstream_backend.so`
+          - bionic Xwayland and its libraries
+          - XKB and X11 data
+          - Rust Smithay compositor source and protocols
+          - Kotlin Android compositor and installation source
+          - TAWC GPU/Wayland design notes
+
+          Termux:X11 is not included or ported.
+
+          ## Important limitation
+
+          `libcompositor.so` is an Android bionic JNI library, not a glibc Wayland executable. It cannot be dropped into an ordinary Linux chroot as a standalone compositor process. It must be loaded by an Android application through JNI and started through the TAWC compositor service boundary.
+
+          The same applies to the bundled Xwayland executable. It is an Android bionic binary packaged as `libxwayland.so` and renamed to `Xwayland` by the installation layout.
+
+          This payload is ready to integrate into another Android compositor project. A native glibc Wayland daemon would be a separate port and is intentionally not performed.
+
+          ## Android integration
+
+          1. Copy the arm64 JNI libraries into the app native-library directory.
+          2. Load `libcompositor.so` through the JNI bridge.
+          3. Copy `libgfxstream_backend.so` and `libc++_shared.so` when gfxstream is enabled.
+          4. Start the compositor from the Android service.
+          5. Expose the Wayland socket to the rootfs.
+          6. Expose the kumquat socket for gfxstream.
+          7. Keep executable Android binaries in the native-library directory to avoid SELinux `execute_no_trans` failures.
+
+          The Kotlin files are under `source/tawc/app/src/main/java/me/phie/tawc/compositor`. The Rust implementation is under `source/tawc/compositor`.
+
+          ## Xwayland
+
+          The original APK packages `Xwayland` as `libxwayland.so` and `xkbcomp` as `libxkbcomp.so`. The included installation script restores the executable names.
+
+          ```sh
+          export TAWC_WAYLAND_PREFIX=/path/to/wayland/compositor
+          source "$TAWC_WAYLAND_PREFIX/env-xwayland.sh"
+          "$TAWC_WAYLAND_PREFIX/bin/Xwayland" -ac -terminate 5
+          ```
+
+          X clients use `DISPLAY=:0`. The host must expose the X11 socket to the rootfs.
+
+          ## Buffer path
+
+          1. A Wayland client creates a surface.
+          2. libhybris or gfxstream creates an Android hardware buffer.
+          3. The buffer is sent through `android_wlegl`.
+          4. The compositor imports it as an EGL image.
+          5. The compositor presents it through Android SurfaceFlinger.
+
+          The Wayland compositor and GPU payload must use the same backend selection.
+
+          ## Troubleshooting
+
+          | Error | Cause | Fix |
+          |---|---|---|
+          | `UnsatisfiedLinkError: libcompositor.so` | Wrong ABI or missing JNI library | Install the arm64-v8a library in the app JNI directory |
+          | Missing `libc++_shared.so` | C++ runtime absent | Copy it beside the JNI libraries |
+          | Xwayland exits immediately | Missing XKB or library path | Set `LD_LIBRARY_PATH` and `XKB_CONFIG_ROOT` |
+          | `execute_no_trans` | App-data binary execution denied by SELinux | Execute from the native-library directory |
+          | X clients cannot connect | X11 socket not exposed | Bind or fake-bind the socket into the rootfs |
+          | Magenta output | SHM fallback or failed AHB import | Check GPU backend and compositor logs |
+          | Gfxstream failure | Kumquat socket unavailable | Start the Android compositor and expose the socket |
+          | `Exec format error` in a glibc chroot | Android bionic binary launched as glibc | Use Android-side integration; do not execute it in a normal chroot |
+          | X11 software rendering | GLAMOR disabled upstream | Expected; GPU X11 presentation uses the AHB path |
+
+          The source snapshot is provided for integration and study. It is not a prebuilt glibc compositor package.
+          EOF
+          cat > "$bundle/Hybris/PROVENANCE.txt" <<EOF
+          Repository: https://github.com/$UPSTREAM_REPO
+          Release: $RELEASE_TAG
+          Source commit: $SOURCE_COMMIT
+          APK: $APK_NAME
+          APK SHA256: $APK_SHA256
+          EOF
+          cat > "$bundle/wayland/PROVENANCE.txt" <<EOF
+          Repository: https://github.com/$UPSTREAM_REPO
+          Release: $RELEASE_TAG
+          Source commit: $SOURCE_COMMIT
+          APK: $APK_NAME
+          APK SHA256: $APK_SHA256
+          Termux:X11: not included
+          EOF
+          (cd "$bundle" && find Hybris wayland -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+
+      - name: Generate PDF guides without external packages
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/md_pdf.py" <<'PY'
+          import sys
+          from pathlib import Path
+
+          source = Path(sys.argv[1])
+          destination = Path(sys.argv[2])
+          lines = source.read_text(encoding="utf-8").splitlines()
+          pages = []
+          page = []
+          for line in lines:
+              page.append(line.encode("ascii", "replace").decode("ascii")[:92])
+              if len(page) == 46:
+                  pages.append(page)
+                  page = []
+          if page or not pages:
+              pages.append(page)
+
+          def esc(value):
+              return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+          objects = ["<< /Type /Catalog /Pages 2 0 R >>", ""]
+          page_ids = []
+          for number, lines in enumerate(pages):
+              page_id = 3 + number * 2
+              content_id = page_id + 1
+              page_ids.append(page_id)
+              stream = ["BT", "/F1 9 Tf", "48 748 Td", "12 TL"]
+              for line in lines:
+                  stream.extend([f"({esc(line)}) Tj", "T*"])
+              stream.append("ET")
+              text = "\n".join(stream)
+              objects.extend([
+                  "",
+                  f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 {3 + len(pages) * 2} 0 R >> >> /Contents {content_id} 0 R >>",
+                  "",
+                  f"<< /Length {len(text.encode('ascii'))} >>\nstream\n{text}\nendstream",
+              ])
+          objects.extend(["", "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"])
+          kids = " ".join(f"{page_id} 0 R" for page_id in page_ids)
+          objects[1] = f"<< /Type /Pages /Kids [{kids}] /Count {len(page_ids)} >>"
+          output = bytearray(b"%PDF-1.4\n")
+          offsets = [0]
+          for object_id, value in enumerate(objects, 1):
+              offsets.append(len(output))
+              output.extend(f"{object_id} 0 obj\n{value}\nendobj\n".encode("ascii"))
+          xref = len(output)
+          output.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+          output.extend(b"0000000000 65535 f \n")
+          for offset in offsets[1:]:
+              output.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+          output.extend(f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode("ascii"))
+          destination.write_bytes(output)
+          PY
+          python3 "$RUNNER_TEMP/md_pdf.py" "$RUNNER_TEMP/bundle/Hybris/GPU-GUIDE.md" "$RUNNER_TEMP/bundle/Hybris/GPU-GUIDE.pdf"
+          python3 "$RUNNER_TEMP/md_pdf.py" "$RUNNER_TEMP/bundle/wayland/WAYLAND-GUIDE.md" "$RUNNER_TEMP/bundle/wayland/WAYLAND-GUIDE.pdf"
+
+      - name: Validate ZIP roots
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/bundle"
+          archive="$RUNNER_TEMP/tawc-upstream-internals.zip"
+          test "$(find "$bundle" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | tr '\n' ' ')" = "Hybris wayland "
+          (cd "$bundle" && zip -q -r -9 "$archive" Hybris wayland)
+          test "$(unzip -Z1 "$archive" | awk -F/ 'NF > 1 {print $1}' | sort -u | tr '\n' ' ')" = "Hybris wayland "
+          unzip -tq "$archive"
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tawc-upstream-internals
+          path: ${{ runner.temp }}/tawc-upstream-internals.zip
+          if-no-files-found: error
+          retention-days: 14
