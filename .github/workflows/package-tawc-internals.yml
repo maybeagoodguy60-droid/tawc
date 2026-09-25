@@ -95,12 +95,7 @@ jobs:
           fi
           unzip -p "$apk" assets/licenses.json > "$bundle/Hybris/TAWC-licenses.json"
           unzip -p "$apk" assets/licenses.json > "$bundle/wayland/TAWC-licenses.json"
-          curl --fail --location --retry 3 --output "$RUNNER_TEMP/tawc-source.zip" "https://github.com/${UPSTREAM_REPO}/archive/${SOURCE_COMMIT}.zip"
-          cp "$RUNNER_TEMP/tawc-source.zip" "$bundle/wayland/source/tawc-source.zip"
-          cat > "$bundle/wayland/source/README.txt" <<'EOF'
-          The upstream TAWC source archive is stored as tawc-source.zip.
-          Unzip it into this directory to obtain the Kotlin, Rust, build, and design-note source tree.
-          EOF
+          printf '%s\n' "Source archive: https://github.com/${UPSTREAM_REPO}/archive/${SOURCE_COMMIT}.zip" > "$bundle/wayland/source/SOURCE-LINK.txt"
 
       - name: Add installation scripts and environment profiles
         run: |
@@ -242,7 +237,7 @@ jobs:
           cat > "$bundle/wayland/WAYLAND-GUIDE.md" <<'EOF'
           # TAWC Wayland Guide
 
-          This package contains the original upstream TAWC v3 Wayland runtime and the upstream source archive.
+          This package contains the original upstream TAWC v3 Wayland runtime and a link to the upstream source archive.
 
           ## Contents
 
@@ -274,7 +269,7 @@ jobs:
           6. Expose the kumquat socket for gfxstream.
           7. Keep executable Android binaries in the native-library directory to avoid SELinux `execute_no_trans` failures.
 
-          The source archive is stored at `source/tawc-source.zip`. Unzip it to obtain the Kotlin files under `tawc-*/app/src/main/java/me/phie/tawc/compositor` and the Rust implementation under `tawc-*/compositor`.
+          The source archive link is stored at `source/SOURCE-LINK.txt`. Download that archive to obtain the Kotlin files under `tawc-*/app/src/main/java/me/phie/tawc/compositor` and the Rust implementation under `tawc-*/compositor`.
 
           ## Xwayland
 
