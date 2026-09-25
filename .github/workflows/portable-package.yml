@@ -2,6 +2,9 @@ name: Package portable TAWC acceleration bundle
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - portable-package
 
 permissions:
   contents: read
