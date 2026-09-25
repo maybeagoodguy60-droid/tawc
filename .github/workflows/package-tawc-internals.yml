@@ -93,8 +93,13 @@ jobs:
           fi
           unzip -p "$apk" assets/licenses.json > "$bundle/Hybris/TAWC-licenses.json"
           unzip -p "$apk" assets/licenses.json > "$bundle/wayland/TAWC-licenses.json"
-          git -C "$source_dir" archive --format=zip --output="$RUNNER_TEMP/tawc-source.zip" HEAD
-          unzip -q "$RUNNER_TEMP/tawc-source.zip" -d "$bundle/wayland/source/tawc"
+          cp -a "$source_dir/app" "$bundle/wayland/source/tawc/"
+          cp -a "$source_dir/compositor" "$bundle/wayland/source/tawc/"
+          cp -a "$source_dir/scripts" "$bundle/wayland/source/tawc/"
+          cp -a "$source_dir/notes" "$bundle/wayland/source/tawc/"
+          cp -a "$source_dir/deps" "$bundle/wayland/source/tawc/"
+          cp -a "$source_dir/gradle" "$bundle/wayland/source/tawc/"
+          cp -a "$source_dir/gradlew" "$source_dir/gradlew.bat" "$source_dir/gradle.properties" "$source_dir/settings.gradle.kts" "$source_dir/build.gradle.kts" "$source_dir/rust-toolchain.toml" "$source_dir/LICENSE" "$source_dir/LICENSE.MIT" "$bundle/wayland/source/tawc/"
 
       - name: Add installation scripts and environment profiles
         run: |
