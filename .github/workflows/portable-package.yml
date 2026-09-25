@@ -1,0 +1,196 @@
+name: Package portable TAWC acceleration bundle
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TAWC_REV: 41b8692917245bb00ea2d9feca1a69f91e56a48a
+  LIBHYBRIS_REV: 23e12ca8f558e25c07dd0c1263da8075fd4e4c8b
+  SMITHAY_REV: 29d3dd3b6fb0e4557a93916b9996768831df81db
+  XKBCOMMON_REV: 7a31e3585edf78be281559377e26d15f8c4bc655
+  ANDROID_HEADERS_REV: 2c6ac3dcc4f8db593dd69906b0ec22822abfed91
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout TAWC source
+        uses: actions/checkout@v4
+        with:
+          repository: wmww/tawc
+          ref: ${{ env.TAWC_REV }}
+          path: sources/tawc
+          fetch-depth: 1
+          sparse-checkout: |
+            LICENSE
+            LICENSE.MIT
+            README.md
+            compositor
+            deps/deps.list
+            deps/libhybris-shims
+            deps/xwayland-patches
+            deps/mesa-patches
+            deps/gfxstream-patches
+            deps/rutabaga-patches
+            scripts/build-gfxstream-backend.sh
+            scripts/build-host-sysroot.sh
+            scripts/build-libxkbcommon.sh
+            scripts/build-libhybris.sh
+            scripts/build-mesa-gfxstream.sh
+            scripts/build-proot.sh
+            scripts/build-xwayland.sh
+            scripts/lib/deps.sh
+            notes/architecture.md
+            notes/building.md
+            notes/chroot.md
+            notes/gfxstream-bridge.md
+            notes/gpu-strategy.md
+            notes/installation.md
+            notes/libhybris-zink.md
+            notes/proot.md
+            notes/rendering.md
+            notes/wsi-layer.md
+            notes/xwayland.md
+            app/src/main/java/me/phie/tawc/compositor/CompositorService.kt
+            app/src/main/java/me/phie/tawc/compositor/NativeBridge.kt
+            app/src/main/java/me/phie/tawc/install/BridgeInstallProvider.kt
+            app/src/main/java/me/phie/tawc/install/ChrootMethod.kt
+            app/src/main/java/me/phie/tawc/install/ChrootMounter.kt
+            app/src/main/java/me/phie/tawc/install/LibhybrisInstallProvider.kt
+            app/src/main/java/me/phie/tawc/install/LinkerConfig.kt
+            app/src/main/java/me/phie/tawc/install/MesaZinkInstallProvider.kt
+            app/src/main/java/me/phie/tawc/install/ProotMethod.kt
+            app/src/main/java/me/phie/tawc/install/RootfsEnv.kt
+            app/src/main/java/me/phie/tawc/install/TawcrootMethod.kt
+          sparse-checkout-cone-mode: false
+
+      - name: Checkout libhybris source
+        uses: actions/checkout@v4
+        with:
+          repository: wmww/libhybris
+          ref: ${{ env.LIBHYBRIS_REV }}
+          path: sources/libhybris
+          fetch-depth: 1
+
+      - name: Checkout Smithay source
+        uses: actions/checkout@v4
+        with:
+          repository: wmww/smithay
+          ref: ${{ env.SMITHAY_REV }}
+          path: sources/smithay
+          fetch-depth: 1
+
+      - name: Checkout libxkbcommon source
+        uses: actions/checkout@v4
+        with:
+          repository: xkbcommon/libxkbcommon
+          ref: ${{ env.XKBCOMMON_REV }}
+          path: sources/libxkbcommon
+          fetch-depth: 1
+
+      - name: Checkout Android headers source
+        uses: actions/checkout@v4
+        with:
+          repository: Halium/android-headers
+          ref: ${{ env.ANDROID_HEADERS_REV }}
+          path: sources/android-headers
+          fetch-depth: 1
+
+      - name: Assemble portable bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf tawc_portable tawc-portable.zip
+          rm -rf sources/tawc/.git sources/libhybris/.git sources/smithay/.git sources/libxkbcommon/.git sources/android-headers/.git
+          mkdir -p tawc_portable/Hybris/deps tawc_portable/Hybris/scripts/lib
+          mkdir -p tawc_portable/Wayland/deps tawc_portable/Wayland/scripts/lib
+          mkdir -p tawc_portable/Wayland/integration tawc_portable/Wayland/notes tawc_portable/licenses
+
+          cp -a sources/libhybris tawc_portable/Hybris/deps/libhybris
+          cp -a sources/android-headers tawc_portable/Hybris/deps/android-headers
+          cp -a sources/tawc/deps/libhybris-shims tawc_portable/Hybris/deps/libhybris-shims
+          cp sources/tawc/deps/deps.list tawc_portable/Hybris/deps/deps.list
+          cp sources/tawc/scripts/build-libhybris.sh tawc_portable/Hybris/scripts/build-libhybris.sh
+          cp sources/tawc/scripts/lib/deps.sh tawc_portable/Hybris/scripts/lib/deps.sh
+          cp sources/libhybris/TAWC_FORK.md tawc_portable/Hybris/TAWC_FORK.md
+
+          cp -a sources/tawc/compositor tawc_portable/Wayland/compositor
+          cp -a sources/smithay tawc_portable/Wayland/deps/smithay
+          cp -a sources/libxkbcommon tawc_portable/Wayland/deps/libxkbcommon
+          cp -a sources/tawc/deps/xwayland-patches tawc_portable/Wayland/deps/xwayland-patches
+          cp -a sources/tawc/deps/mesa-patches tawc_portable/Wayland/deps/mesa-patches
+          cp -a sources/tawc/deps/gfxstream-patches tawc_portable/Wayland/deps/gfxstream-patches
+          cp -a sources/tawc/deps/rutabaga-patches tawc_portable/Wayland/deps/rutabaga-patches
+          cp sources/tawc/deps/deps.list tawc_portable/Wayland/deps/deps.list
+          for script in build-gfxstream-backend.sh build-host-sysroot.sh build-libxkbcommon.sh build-mesa-gfxstream.sh build-proot.sh build-xwayland.sh; do
+            cp "sources/tawc/scripts/$script" "tawc_portable/Wayland/scripts/$script"
+          done
+          cp sources/tawc/scripts/lib/deps.sh tawc_portable/Wayland/scripts/lib/deps.sh
+
+          for file in \
+            app/src/main/java/me/phie/tawc/compositor/CompositorService.kt \
+            app/src/main/java/me/phie/tawc/compositor/NativeBridge.kt \
+            app/src/main/java/me/phie/tawc/install/BridgeInstallProvider.kt \
+            app/src/main/java/me/phie/tawc/install/ChrootMethod.kt \
+            app/src/main/java/me/phie/tawc/install/ChrootMounter.kt \
+            app/src/main/java/me/phie/tawc/install/LibhybrisInstallProvider.kt \
+            app/src/main/java/me/phie/tawc/install/LinkerConfig.kt \
+            app/src/main/java/me/phie/tawc/install/MesaZinkInstallProvider.kt \
+            app/src/main/java/me/phie/tawc/install/ProotMethod.kt \
+            app/src/main/java/me/phie/tawc/install/RootfsEnv.kt \
+            app/src/main/java/me/phie/tawc/install/TawcrootMethod.kt; do
+            mkdir -p "tawc_portable/Wayland/integration/$(dirname "$file")"
+            cp "sources/tawc/$file" "tawc_portable/Wayland/integration/$file"
+          done
+
+          for note in architecture.md building.md chroot.md gfxstream-bridge.md gpu-strategy.md installation.md libhybris-zink.md proot.md rendering.md wsi-layer.md xwayland.md; do
+            cp "sources/tawc/notes/$note" "tawc_portable/Wayland/notes/$note"
+          done
+
+          for source in sources/tawc sources/libhybris sources/smithay sources/libxkbcommon sources/android-headers; do
+            for license in "$source"/LICENSE* "$source"/COPYING*; do
+              [ -f "$license" ] || continue
+              name="$(basename "$source")-$(basename "$license")"
+              cp "$license" "tawc_portable/licenses/$name"
+            done
+          done
+
+          cat > tawc_portable/PACKAGE-MANIFEST.txt <<EOF
+          TAWC portable acceleration bundle
+          source: wmww/tawc
+          tawc_revision: ${{ env.TAWC_REV }}
+          libhybris_source: wmww/libhybris
+          libhybris_revision: ${{ env.LIBHYBRIS_REV }}
+          smithay_source: wmww/smithay
+          smithay_revision: ${{ env.SMITHAY_REV }}
+          libxkbcommon_source: xkbcommon/libxkbcommon
+          libxkbcommon_revision: ${{ env.XKBCOMMON_REV }}
+          android_headers_source: Halium/android-headers
+          android_headers_revision: ${{ env.ANDROID_HEADERS_REV }}
+          production_gpu_path: libhybris + Android EGL/GLES + AHardwareBuffer
+          optional_gpu_paths: Mesa-Zink and gfxstream build inputs are pinned in Wayland/deps/deps.list
+          integration_targets: proot, chroot, and generic rootfs launchers
+          package_type: source integration bundle, not an APK
+          hybris_entrypoint: Hybris/scripts/build-libhybris.sh
+          wayland_entrypoint: Wayland/scripts/build-xwayland.sh
+          compositor_entrypoint: Wayland/compositor
+          EOF
+
+          chmod +x tawc_portable/Hybris/scripts/build-libhybris.sh
+          chmod +x tawc_portable/Wayland/scripts/*.sh
+          zip -q -r -9 -y tawc-portable.zip tawc_portable
+          zip -T tawc-portable.zip
+          sha256sum tawc-portable.zip
+          du -sh tawc_portable tawc-portable.zip
+
+      - name: Upload portable bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: tawc-portable-gpu
+          path: tawc-portable.zip
+          if-no-files-found: error
+          retention-days: 30
