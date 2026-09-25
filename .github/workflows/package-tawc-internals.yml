@@ -93,8 +93,7 @@ jobs:
           fi
           unzip -p "$apk" assets/licenses.json > "$bundle/Hybris/TAWC-licenses.json"
           unzip -p "$apk" assets/licenses.json > "$bundle/wayland/TAWC-licenses.json"
-          cp -a "$source_dir/." "$bundle/wayland/source/tawc/"
-          rm -rf "$bundle/wayland/source/tawc/.git"
+          git -C "$source_dir" archive --format=tar HEAD | tar -C "$bundle/wayland/source/tawc" -xf -
 
       - name: Add installation scripts and environment profiles
         run: |
