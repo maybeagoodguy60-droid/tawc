@@ -99,7 +99,7 @@ jobs:
           rm -rf "$bundle/wayland/source/tawc"
           mkdir -p "$bundle/wayland/source"
           unzip -q "$RUNNER_TEMP/tawc-source.zip" -d "$bundle/wayland/source"
-          mv "$bundle/wayland/source"/tawc-* "$bundle/wayland/source/tawc"
+          mv "$bundle/wayland/source"/* "$bundle/wayland/source/tawc"
 
       - name: Add installation scripts and environment profiles
         run: |
